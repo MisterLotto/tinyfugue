@@ -106,10 +106,10 @@
 /for red 0 5 \
     /for green 0 5 \
 	/for blue 0 5 \
-	    /set start_color_rgb%%%{red}%%%{green}%%%{blue}=\
-		^[[38;5;$$$[16 + red*36 + green*6 + blue]m%%%; \
-	    /set start_color_bgrgb%%%{red}%%%{green}%%%{blue}=\
-		^[[48;5;$$$[16 + red*36 + green*6 + blue]m
+	    /set start_color_rgb%{red}%{green}%{blue}=\
+		^[[38;5;$[16 + red*36 + green*6 + blue]m%; \
+	    /set start_color_bgrgb%{red}%{green}%{blue}=\
+		^[[48;5;$[16 + red*36 + green*6 + blue]m
 
 /for i 0 23 \
     /set start_color_gray%i=^[[38;5;$[232+i]m%; \

@@ -2844,8 +2844,18 @@ static void color_on(const char *prefix, long color)
         print_to_ascii(outbuf, ctlseq);
     } else {
         sprintf(buf, "start_color_%s%ld", prefix, color);
-        if ((ctlseq = getvar(buf)))
+        if ((ctlseq = getvar(buf))) {
             print_to_ascii(outbuf, ctlseq);
+#if NCOLORS == 256
+        } else if (color >= 16) {
+            /* No variable configured for this extended color index;
+             * emit the xterm 256-color ANSI sequence directly. */
+            if (prefix[0] == 'b')
+                Sappendf(outbuf, "\033[48;5;%ldm", color);
+            else
+                Sappendf(outbuf, "\033[38;5;%ldm", color);
+#endif
+        }
     }
 }
 
