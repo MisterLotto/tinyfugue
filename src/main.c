@@ -72,6 +72,8 @@ char *main_configfile=NULL;
 int main(int argc, char *argv[])
 {
     char *opt, *argv0 = argv[0];
+    int orig_argc = argc;
+    char **orig_argv = argv;
     char *configfile = NULL, *command = NULL, *libdir = NULL;
     char *resume_file = NULL;
     int worldflag = TRUE;
@@ -84,8 +86,6 @@ int main(int argc, char *argv[])
     puts(version);
     puts(mods);
     puts(copyright);
-
-    restart_set_argv(argc, argv);
 
     while (--argc > 0 && (*++argv)[0] == '-') {
         if (strcmp(*argv, "--resume") == 0) {
@@ -158,6 +158,7 @@ int main(int argc, char *argv[])
 
     SRAND(getpid() + time(NULL));	/* seed random generator */
     init_malloc();			/* malloc.c   */
+    restart_set_argv(orig_argc, orig_argv);
     init_tfio();			/* tfio.c     */
     init_util1();			/* util.c     */
     init_expand();			/* expand.c   */
