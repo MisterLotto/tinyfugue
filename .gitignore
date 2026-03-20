@@ -9,6 +9,8 @@
 *.a
 
 #
+.*/
+.claude/*
 config.log
 aclocal.m4
 autoscan.log
@@ -26,3 +28,4 @@ src/tfdefs.h
 src/default
 unix/vars.mak
 Makefile
+/.claude

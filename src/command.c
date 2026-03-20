@@ -28,6 +28,7 @@
 #include "expand.h"     /* macro_run() */
 #include "signals.h"    /* suspend(), shell() */
 #include "variable.h"
+#include "restart.h"
 #include "lua.h" /* lua scripting handling */
 #include "tfpython.h"
 
@@ -228,6 +229,35 @@ struct Value *handle_quit_command(String *args, int offset)
     }
     quit_flag = 1;
     return shareval(val_one);
+}
+
+struct Value *handle_reboot_command(String *args, int offset)
+{
+    int yes = 0;
+    int c;
+
+    startopt(CS(args), "y");
+    while ((c = nextopt(NULL, NULL, NULL, &offset))) {
+        if (c == 'y') yes++;
+        else return shareval(val_zero);
+    }
+
+    if (args->len > offset) {
+        eprintf("unexpected argument: %s", args->data + offset);
+        return shareval(val_zero);
+    }
+
+    if (tfinteractive && have_active_socks() && !yes) {
+        fix_screen();
+        puts("Online reboot now? Active sessions will be preserved when possible. (y/N)\r");
+        fflush(stdout);
+        c = igetchar();
+        redraw();
+        if (lcase(c) != 'y')
+            return shareval(val_zero);
+    }
+
+    return newint(restart_exec());
 }
 
 struct Value *handle_sh_command(String *args, int offset)

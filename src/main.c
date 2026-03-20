@@ -37,6 +37,7 @@
 #include "expr.h"
 #include "process.h"
 #include "malloc.h"
+#include "restart.h"
 
 extern struct World   *world_decl;     /* declares struct World */
 
@@ -72,6 +73,7 @@ int main(int argc, char *argv[])
 {
     char *opt, *argv0 = argv[0];
     char *configfile = NULL, *command = NULL, *libdir = NULL;
+    char *resume_file = NULL;
     int worldflag = TRUE;
     int autologin = -1, quietlogin = -1, autovisual = TRUE;
     String *scratch;
@@ -83,7 +85,17 @@ int main(int argc, char *argv[])
     puts(mods);
     puts(copyright);
 
+    restart_set_argv(argc, argv);
+
     while (--argc > 0 && (*++argv)[0] == '-') {
+        if (strcmp(*argv, "--resume") == 0) {
+            if (--argc <= 0) goto error;
+            resume_file = *++argv;
+            continue;
+        } else if (strncmp(*argv, "--resume=", 9) == 0) {
+            resume_file = *argv + 9;
+            continue;
+        }
         if (!(*argv)[1]) { argc--; argv++; break; }
         for (opt = *argv + 1; *opt; )
             switch (*opt++) {
@@ -120,8 +132,8 @@ int main(int argc, char *argv[])
     if (argc > 2) {
     error:
         fputs("\n", stderr);
-        fprintf(stderr, "Usage: %s [-L<dir>] [-f[<file>]] [-c<cmd>] [-vnlq] [<world>]\n", argv0);
-        fprintf(stderr, "       %s [-L<dir>] [-f[<file>]] [-c<cmd>] [-vlq] <host> <port>\n", argv0);
+        fprintf(stderr, "Usage: %s [--resume <file>] [-L<dir>] [-f[<file>]] [-c<cmd>] [-vnlq] [<world>]\n", argv0);
+        fprintf(stderr, "       %s [--resume <file>] [-L<dir>] [-f[<file>]] [-c<cmd>] [-vlq] <host> <port>\n", argv0);
         fputs("Options:\n", stderr);
         fputs("  -L<dir>   use <dir> as library directory (%TFLIBDIR)\n", stderr);
         fputs("  -f        don't load personal config file (.tfrc)\n", stderr);
@@ -206,7 +218,10 @@ int main(int argc, char *argv[])
     if (getintvar(VAR_interactive) < 0)
         set_var_by_id(VAR_interactive, !no_tty);
 
-    if (argc > 0 || worldflag) {
+    if (resume_file) {
+        if (!restart_resume(resume_file))
+            return 1;
+    } else if (argc > 0 || worldflag) {
 	int flags = 0;
         if (autologin < 0) autologin = login;
         if (quietlogin < 0) quietlogin = quietflag;

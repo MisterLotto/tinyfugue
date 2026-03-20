@@ -20,6 +20,34 @@
 #define CONN_BG		0x08
 #define CONN_FG		0x10
 
+#define RESTART_TELNET_VECTOR_BYTES 32
+
+typedef struct RestartSockState {
+    int mode;
+    int fd;
+    int foreground;
+    int active;
+    int constate;
+    unsigned int flags;
+    int numquiet;
+    int ttype;
+    attr_t attrs;
+    attr_t prepromptattrs;
+    unsigned long alert_id;
+    struct timeval recv_time;
+    struct timeval send_time;
+    struct timeval prompt_timeout;
+    char fsastate;
+    char substate;
+    unsigned char tn_us[RESTART_TELNET_VECTOR_BYTES];
+    unsigned char tn_us_tog[RESTART_TELNET_VECTOR_BYTES];
+    unsigned char tn_them[RESTART_TELNET_VECTOR_BYTES];
+    unsigned char tn_them_tog[RESTART_TELNET_VECTOR_BYTES];
+    char *prompt_data;
+    attr_t prompt_attrs;
+    char *buffer_data;
+} RestartSockState;
+
 extern String *incoming_text;
 extern int quit_flag;
 extern struct Sock *xsock;
@@ -65,5 +93,12 @@ extern void          xsock_alert_id(void);
 extern const char   *fgname(void);
 extern const char   *world_info(const char *worldname, const char *fieldname);
 extern struct World *named_or_current_world(const char *name);
+extern int restart_flush_sockets(void);
+extern int restart_snapshot_socket(struct World *world, RestartSockState *state);
+extern void restart_free_socket_state(RestartSockState *state);
+extern int restart_restore_socket(struct World *world,
+    const RestartSockState *state);
+extern int restart_set_foreground(struct World *world);
+extern void restart_recount_active(void);
 
 #endif /* SOCKET_H */

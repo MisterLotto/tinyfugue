@@ -347,6 +347,7 @@ typedef struct {
 static Sock *find_sock(const char *name);
 static void  wload(World *w);
 static int   fg_sock(Sock *sock, int quiet);
+static Sock *alloc_sock(World *world);
 static int   get_host_address(Sock *sock, const char **what, int *errp);
 #if !HAVE_GETADDRINFO
 static int   tfgetaddrinfo(const char *nodename, const char *port,
@@ -1320,32 +1321,26 @@ int openworld(const char *name, const char *port, int flags)
     return world ? opensock(world, flags) : 0;
 }
 
-static int opensock(World *world, int flags)
+static Sock *alloc_sock(World *world)
 {
-    int gai_err;
-    const char *what;
-
     if (world->sock) {
         if (world->sock->constate < SS_ZOMBIE) {
             eprintf("socket to %s already exists", world->name);
-            return 0;
+            return NULL;
         }
-        /* recycle existing Sock */
-	if (world->sock->constate == SS_DEAD)
-	    dead_socks--;
+        if (world->sock->constate == SS_DEAD)
+            dead_socks--;
         xsock = world->sock;
 #if HAVE_SSL
-	if (xsock->ssl) {
-	    SSL_free(xsock->ssl); /* killsock() closed it, but didn't free it */
-	    xsock->ssl = NULL;
-	}
+        if (xsock->ssl) {
+            SSL_free(xsock->ssl);
+            xsock->ssl = NULL;
+        }
 #endif
-
     } else {
-        /* create and initialize new Sock */
-        if (!(xsock = world->sock = (Sock *) MALLOC(sizeof(struct Sock)))) {
+        if (!(xsock = world->sock = (Sock *)MALLOC(sizeof(struct Sock)))) {
             eprintf("opensock: not enough memory");
-            return 0;
+            return NULL;
         }
         if (!world->screen)
             world->screen = new_screen(hist_getsize(world->history));
@@ -1353,29 +1348,31 @@ static int opensock(World *world, int flags)
         xsock->prev = tsock;
         tsock = *(tsock ? &tsock->next : &hsock) = xsock;
         xsock->prompt = NULL;
-	xsock->prompt_timeout = tvzero;
+        xsock->prompt_timeout = tvzero;
         xsock->next = NULL;
-	xsock->myhost = NULL;
-	xsock->myaddr = NULL;
-	xsock->addrs = NULL;
-	xsock->addr = NULL;
+        xsock->myhost = NULL;
+        xsock->myaddr = NULL;
+        xsock->addrs = NULL;
+        xsock->addr = NULL;
 #if HAVE_SSL
-	xsock->ssl = NULL;
+        xsock->ssl = NULL;
 #endif
     }
-    Stringninit(xsock->buffer, 80);  /* data must be allocated */
+
+    Stringninit(xsock->buffer, 80);
     Stringninit(xsock->subbuffer, 1);
     init_queue(&xsock->queue);
     xsock->host = NULL;
     xsock->port = NULL;
     xsock->ttype = -1;
 #if WIDECHAR
-	 Stringninit(xsock->incomingposttelnet, 1);
-	 /* TODO: Better error handling, /addworld charset setting. */
-    UErrorCode uerr = U_ZERO_ERROR;
-    xsock->incomingfsm = ucnv_open(world->charset, &uerr);
-    if (U_FAILURE(uerr))
-        core("TN_CHARSET: Could not create UConverter.", __FILE__, __LINE__, 0);
+    Stringninit(xsock->incomingposttelnet, 1);
+    {
+        UErrorCode uerr = U_ZERO_ERROR;
+        xsock->incomingfsm = ucnv_open(world->charset, &uerr);
+        if (U_FAILURE(uerr))
+            core("TN_CHARSET: Could not create UConverter.", __FILE__, __LINE__, 0);
+    }
 #endif
     xsock->fd = -1;
     xsock->pid = -1;
@@ -1395,6 +1392,18 @@ static int opensock(World *world, int flags)
     xsock->flags = 0;
     gettime(&xsock->time[SOCK_SEND]);
     xsock->time[SOCK_RECV] = xsock->time[SOCK_SEND];
+    xsock->numquiet = 0;
+
+    return xsock;
+}
+
+static int opensock(World *world, int flags)
+{
+    int gai_err;
+    const char *what;
+
+    if (!alloc_sock(world))
+        return 0;
 
     if ((flags & CONN_QUIETLOGIN) && (flags & CONN_AUTOLOGIN) &&
 	world_character(world))
@@ -2174,6 +2183,152 @@ static int establish(Sock *sock)
     }
 
     return 1;
+}
+
+int restart_flush_sockets(void)
+{
+    Sock *sock;
+    Sock *saved_xsock = xsock;
+
+    for (sock = hsock; sock; sock = sock->next) {
+        xsock = sock;
+        if (sock->queue.list.head)
+            handle_socket_lines();
+    }
+    xsock = saved_xsock;
+    return 1;
+}
+
+int restart_snapshot_socket(World *world, RestartSockState *state)
+{
+    Sock *sock;
+
+    memset(state, 0, sizeof(*state));
+    if (!world || !(sock = world->sock))
+        return 1;
+
+    state->foreground = (sock == fsock);
+    state->active = world->screen ? world->screen->active : 0;
+    state->constate = sock->constate;
+    state->flags = sock->flags;
+    state->numquiet = sock->numquiet;
+    state->ttype = sock->ttype;
+    state->attrs = sock->attrs;
+    state->prepromptattrs = sock->prepromptattrs;
+    state->alert_id = sock->alert_id;
+    state->recv_time = sock->time[SOCK_RECV];
+    state->send_time = sock->time[SOCK_SEND];
+    state->prompt_timeout = sock->prompt_timeout;
+    state->fsastate = sock->fsastate;
+    state->substate = sock->substate;
+    memcpy(state->tn_us, sock->tn_us.bits, RESTART_TELNET_VECTOR_BYTES);
+    memcpy(state->tn_us_tog, sock->tn_us_tog.bits, RESTART_TELNET_VECTOR_BYTES);
+    memcpy(state->tn_them, sock->tn_them.bits, RESTART_TELNET_VECTOR_BYTES);
+    memcpy(state->tn_them_tog, sock->tn_them_tog.bits, RESTART_TELNET_VECTOR_BYTES);
+
+    if (sock->prompt)
+        state->prompt_data = STRDUP(sock->prompt->data);
+    state->prompt_attrs = sock->prompt ? sock->prompt->attrs : 0;
+    if (sock->buffer && sock->buffer->len)
+        state->buffer_data = STRDUP(sock->buffer->data);
+
+    if (sock->constate >= SS_CONNECTED && sock->constate < SS_ZOMBIE &&
+        sock->fd >= 0
+#if HAVE_SSL
+        && !sock->ssl
+#endif
+#if HAVE_MCCP
+        && !sock->zstream
+#endif
+    ) {
+        state->mode = 1;
+        state->fd = sock->fd;
+    } else if (sock->constate < SS_ZOMBIE &&
+        world->host && *world->host && world->port && *world->port)
+    {
+        state->mode = 2;
+        state->fd = -1;
+    }
+
+    return 1;
+}
+
+void restart_free_socket_state(RestartSockState *state)
+{
+    if (!state)
+        return;
+    if (state->prompt_data)
+        FREE(state->prompt_data);
+    if (state->buffer_data)
+        FREE(state->buffer_data);
+    memset(state, 0, sizeof(*state));
+}
+
+int restart_restore_socket(World *world, const RestartSockState *state)
+{
+    Sock *sock;
+    int set_reader = 0;
+
+    if (!world || !state || state->mode != 1)
+        return 0;
+    if (!(sock = alloc_sock(world)))
+        return 0;
+
+    sock->fd = state->fd;
+    sock->constate = state->constate;
+    sock->flags = state->flags;
+    sock->numquiet = state->numquiet;
+    sock->ttype = state->ttype;
+    sock->attrs = state->attrs;
+    sock->prepromptattrs = state->prepromptattrs;
+    sock->alert_id = state->alert_id;
+    sock->time[SOCK_RECV] = state->recv_time;
+    sock->time[SOCK_SEND] = state->send_time;
+    sock->prompt_timeout = state->prompt_timeout;
+    sock->fsastate = state->fsastate;
+    sock->substate = state->substate;
+    memcpy(sock->tn_us.bits, state->tn_us, RESTART_TELNET_VECTOR_BYTES);
+    memcpy(sock->tn_us_tog.bits, state->tn_us_tog, RESTART_TELNET_VECTOR_BYTES);
+    memcpy(sock->tn_them.bits, state->tn_them, RESTART_TELNET_VECTOR_BYTES);
+    memcpy(sock->tn_them_tog.bits, state->tn_them_tog, RESTART_TELNET_VECTOR_BYTES);
+
+    if (world->host && *world->host)
+        sock->host = STRDUP(world->host);
+    if (world->port && *world->port)
+        sock->port = STRDUP(world->port);
+    if (world->myhost && *world->myhost)
+        sock->myhost = STRDUP(world->myhost);
+
+    if (state->prompt_data) {
+        sock->prompt = CS(Stringnew(state->prompt_data, -1, state->prompt_attrs));
+        sock->prompt->links++;
+    }
+    if (state->buffer_data)
+        Stringcpy(sock->buffer, state->buffer_data);
+
+    if (sock->constate == SS_CONNECTED || sock->constate == SS_OPEN)
+        set_reader = state->foreground || background;
+    if (set_reader)
+        readers_set(sock->fd);
+    return 1;
+}
+
+int restart_set_foreground(World *world)
+{
+    return fg_sock(world && world->sock ? world->sock : NULL, TRUE);
+}
+
+void restart_recount_active(void)
+{
+    Sock *sock;
+
+    active_count = 0;
+    for (sock = hsock; sock; sock = sock->next) {
+        if (sock != fsock && sock->world && sock->world->screen &&
+            sock->world->screen->active)
+            active_count++;
+    }
+    update_status_field(NULL, STAT_ACTIVE);
 }
 
 #if HAVE_SSL
