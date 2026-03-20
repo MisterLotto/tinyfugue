@@ -211,6 +211,7 @@ static int restore_screen(FILE *fp, Screen *screen)
         if (!data && ferror(fp))
             return 0;
         line = Stringnew(data ? data : "", -1, (attr_t)attrs);
+        line->links++;
         enscreen(screen, CS(line));
         Stringfree(line);
         if (data)
