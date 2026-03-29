@@ -386,7 +386,9 @@ int do_kbdel(int place)
     return keyboard_pos;
 }
 
-#define is_inword(c) (is_alnum(c) || (wordpunct && strchr(wordpunct, (c))))
+static inline int is_inword(int c) {
+    return is_alnum(c) || (wordpunct && strchr(wordpunct, c));
+}
 
 int do_kbword(int start, int dir)
 {

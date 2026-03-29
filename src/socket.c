@@ -677,17 +677,14 @@ static void init_ssl(void)
     SSL_load_error_strings();
     SSL_library_init();
     /* XXX seed PRNG */
-    if( ssl_insecure ) {
-    ssl_ctx = SSL_CTX_new(TLSv1_client_method());
-    } else {
-    ssl_ctx = SSL_CTX_new(SSLv23_client_method());
-    }
+    ssl_ctx = SSL_CTX_new(TLS_client_method());
     if (!ssl_ctx) {
 	ssl_err("SSL_CTX_new");
 	return;
     }
     if( ssl_insecure ) {
         SSL_CTX_set_security_level(ssl_ctx,0);
+        SSL_CTX_set_min_proto_version(ssl_ctx, 0);
     }
     if (!SSL_CTX_set_cipher_list(ssl_ctx, "ALL")) {
 	ssl_err("SSL_CTX_set_cipher_list");
@@ -1440,7 +1437,7 @@ static int opensock(World *world, int flags)
     } else if (!(world->flags & WORLD_NOPROXY) && proxy_host && *proxy_host) {
 	/* open a connection through a proxy */
         xsock->flags |= SOCKPROXY;
-        xsock->host = STRDUP(proxy_host);
+        xsock->host = proxy_host ? STRDUP(proxy_host) : NULL;
         xsock->port = (proxy_port && *proxy_port) ? proxy_port : "23";
         xsock->port = STRDUP(xsock->port);
     } else {
@@ -1454,7 +1451,7 @@ static int opensock(World *world, int flags)
     if (world->myhost && *world->myhost)
 	xsock->myhost = STRDUP(world->myhost);
     else if (tfhost)
-	xsock->myhost = STRDUP(tfhost);
+	xsock->myhost = tfhost ? STRDUP(tfhost) : NULL;
     else
 	xsock->myhost = NULL;
 
@@ -1623,7 +1620,7 @@ static int openconn(Sock *sock)
 	    xsock->addrs = NULL;
 	} else {
 	    xsock->addrs = XMALLOC(info.size);
-	    read(xsock->fd, (char*)xsock->addrs, info.size);
+	    (void)read(xsock->fd, (char*)xsock->addrs, info.size);
 	}
         close(xsock->fd);
 # ifdef PLATFORM_UNIX
@@ -1957,11 +1954,11 @@ static void waitforhostname(int fd, const char *name, const char *port)
 		niov++;
 	    }
 	}
-	writev(fd, iov, niov);
+	(void)writev(fd, iov, niov);
 	if (res) freeaddrinfo(res);
     } else {
 	hdr.size = 0;
-	write(fd, &hdr, sizeof(hdr));
+	(void)write(fd, &hdr, sizeof(hdr));
     }
     close(fd);
 }

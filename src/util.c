@@ -635,7 +635,7 @@ int ch_mailfile(Var *var)
 	    newlist = add_mail_file(newlist, name);
 	}
     } else {
-	newlist = add_mail_file(newlist, STRDUP(MAIL));
+	if (MAIL) newlist = add_mail_file(newlist, STRDUP(MAIL));
     }
     free_maillist();
     maillist = newlist;

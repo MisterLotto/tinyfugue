@@ -796,7 +796,7 @@ char igetchar(void)
     FD_ZERO(&readers);
     FD_SET(STDIN_FILENO, &readers);
     while(select(1, &readers, NULL, NULL, NULL) <= 0);
-    read(STDIN_FILENO, &c, 1);
+    (void)read(STDIN_FILENO, &c, 1);
     return c;
 }
 

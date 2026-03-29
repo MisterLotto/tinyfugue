@@ -556,7 +556,7 @@ static void init_term(void)
 
 	if (!keypad_off) keypad_on = NULL;
 
-        if (strcmp(TERM, "xterm") == 0) {
+        if (TERM && strcmp(TERM, "xterm") == 0) {
 #if 0	    /* Now that tf has virtual screens, the secondary buffer is ok. */
             enter_ca_mode = exit_ca_mode = NULL; /* Avoid secondary buffer. */
 #endif
@@ -564,7 +564,7 @@ static void init_term(void)
             if (!set_scroll_region)
                 set_scroll_region = "\033[%i%d;%dr";
         }
-        if (strcmp(TERM, "linux") == 0) {
+        if (TERM && strcmp(TERM, "linux") == 0) {
             /* Many "linux" termcaps mistakenly omit "ks" and "ke". */
             if (!keypad_on && !keypad_off) {
 		keypad_on = "\033[?1h\033=";
