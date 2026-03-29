@@ -180,7 +180,7 @@ int handle_keyboard_input(int read_flag)
             } else if (s[key_start] == '\b' || s[key_start] == '\177') {
                 handle_input_string(s + input_start, key_start - input_start);
                 place = input_start = ++key_start;
-                do_kbdel(keyboard_pos - kbnumval);
+                do_kbdel(do_kbcharback(kbnumval));
 		reset_kbnum();
             } else if (kbnum && is_digit(s[key_start]) &&
 		key_start == input_start)
@@ -367,6 +367,52 @@ static int replace_input(String *line)
     }
     handle_input_string(line->data, line->len);
     return 1;
+}
+
+#if WIDECHAR
+/* Walk back n UTF-8 characters from byte position pos in buf. */
+static int utf8_prev_char_n(const char *buf, int pos, int n)
+{
+    while (n-- > 0 && pos > 0) {
+        pos--;
+        while (pos > 0 && ((unsigned char)buf[pos] & 0xC0) == 0x80)
+            pos--;
+    }
+    return pos;
+}
+
+/* Walk forward n UTF-8 characters from byte position pos in buf of length len. */
+static int utf8_next_char_n(const char *buf, int pos, int len, int n)
+{
+    while (n-- > 0 && pos < len) {
+        pos++;
+        while (pos < len && ((unsigned char)buf[pos] & 0xC0) == 0x80)
+            pos++;
+    }
+    return pos;
+}
+#endif /* WIDECHAR */
+
+/* Return the byte position n characters before the cursor. */
+int do_kbcharback(int n)
+{
+#if WIDECHAR
+    return utf8_prev_char_n(keybuf->data, keyboard_pos, n);
+#else
+    int pos = keyboard_pos - n;
+    return pos < 0 ? 0 : pos;
+#endif
+}
+
+/* Return the byte position n characters after the cursor. */
+int do_kbcharfwd(int n)
+{
+#if WIDECHAR
+    return utf8_next_char_n(keybuf->data, keyboard_pos, keybuf->len, n);
+#else
+    int pos = keyboard_pos + n;
+    return pos > keybuf->len ? keybuf->len : pos;
+#endif
 }
 
 int do_kbdel(int place)

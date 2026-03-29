@@ -1451,6 +1451,12 @@ static Value *function_switch(const ExprFunc *func, int n, const char *parent)
         case FN_kbgoto:
             return newint(igoto(opdint(1)));
 
+        case FN_kbcharback:
+            return newint(do_kbcharback(n > 0 ? opdint(1) : 1));
+
+        case FN_kbcharfwd:
+            return newint(do_kbcharfwd(n > 0 ? opdint(1) : 1));
+
         case FN_kbdel:
             return (newint(do_kbdel(opdint(1))));
 
