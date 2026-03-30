@@ -418,13 +418,15 @@ int do_kbcharfwd(int n)
 int do_kbdel(int place)
 {
     if (place >= 0 && place < keyboard_pos) {
+        int col_len = utf8_col_width(keybuf->data + place, keyboard_pos - place);
         Stringcpy(scratch, keybuf->data + keyboard_pos);
         SStringcat(Stringtrunc(keybuf, place), CS(scratch));
-        idel(place);
+        idel(place, col_len);
     } else if (place > keyboard_pos && place <= keybuf->len) {
+        int col_len = utf8_col_width(keybuf->data + keyboard_pos, place - keyboard_pos);
         Stringcpy(scratch, keybuf->data + place);
         SStringcat(Stringtrunc(keybuf, keyboard_pos), CS(scratch));
-        idel(place);
+        idel(keyboard_pos, col_len);
     } else {
         dobell(1);
     }
