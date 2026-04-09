@@ -143,7 +143,7 @@ int handle_keyboard_input(int read_flag)
         if (istrip) buf[i] &= 0x7F;
         if (buf[i] & 0x80) {
 	    if (!literal_next &&
-		(meta_esc == META_ON || (!is_print(buf[i]) && meta_esc)))
+		(meta_esc == META_ON || (!is_print(buf[i]) && meta_esc && (unsigned char)buf[i] < 0xA0)))
 	    {
 		Stringadd(current_input, '\033');
 		buf[i] &= 0x7F;
