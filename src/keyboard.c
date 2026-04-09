@@ -148,8 +148,6 @@ int handle_keyboard_input(int read_flag)
 		Stringadd(current_input, '\033');
 		buf[i] &= 0x7F;
 	    }
-	    if (!is_print(buf[i]))
-		buf[i] &= 0x7F;
         }
 #endif
         Stringadd(current_input, mapchar(buf[i]));
