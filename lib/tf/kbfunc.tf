@@ -25,17 +25,17 @@
 
 ;;; /dokey functions.
 
-/def -i dokey_bspc	= /@test kbdel(kbpoint() - (kbnum?:1))
+/def -i dokey_bspc	= /@test kbdel(kbcharback(kbnum?:1))
 /def -i dokey_bword	= /@test regmatch("[^ ]* *$$", kbhead()), \
 			        kbdel(kbpoint() - strlen({P0}))
-/def -i dokey_dch	= /@test kbdel(kbpoint() + (kbnum?:1))
+/def -i dokey_dch	= /@test kbdel(kbcharfwd(kbnum?:1))
 /def -i dokey_deol	= /@test kbdel(kblen())
 /def -i dokey_dline	= /@test kbgoto(0), kbdel(kblen())
 /def -i dokey_down	= /@test kbgoto(kbpoint() + wrapsize * (kbnum?:1))
 /def -i dokey_dword	= /kb_kill_word
 /def -i dokey_end	= /@test kbgoto(kblen())
 /def -i dokey_home	= /@test kbgoto(0)
-/def -i dokey_left	= /@test kbgoto(kbpoint() - (kbnum?:1))
+/def -i dokey_left	= /@test kbgoto(kbcharback(kbnum?:1))
 /def -i dokey_lnext	= /dokey lnext
 /def -i dokey_newline	= /dokey newline
 /def -i dokey_pause	= /dokey pause
@@ -44,7 +44,7 @@
 /def -i dokey_recallend	= /dokey recallend
 /def -i dokey_recallf	= /dokey recallf
 /def -i dokey_redraw	= /dokey redraw
-/def -i dokey_right	= /@test kbgoto(kbpoint() + (kbnum?:1))
+/def -i dokey_right	= /@test kbgoto(kbcharfwd(kbnum?:1))
 /def -i dokey_searchb	= /dokey searchb
 /def -i dokey_searchf	= /dokey searchf
 /def -i dokey_socketb	= /fg -c$[-kbnum?:-1]
