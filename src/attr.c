@@ -563,7 +563,7 @@ String *decode_ansi(const char *s, attr_t attrs, int emul, attr_t *final_attrs)
         } else if (((ret = mbrtowc(&wc, s, in_len - (s - start), &mbs)) > 0)
 		&& (iswprint(wc) || *s == '\t')) {
 #else
-        } else if (is_print(*s) || *s == '\t') {
+        } else if (is_print(*s) || *s == '\t' || (unsigned char)*s >= 0x80) {
 #endif
 	    int orig_len = dst->len;
 	    if (*s == '\t' && expand_tabs) {
