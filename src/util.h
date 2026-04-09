@@ -29,7 +29,7 @@ struct feature {
 #define unmapchar(c)  ((char)(((c) == (char)0x80) ? 0x0 : (c)))
 
 /* Map character into set allowed by locale */
-#define localize(c)  ((is_print(c) || is_cntrl(c)) ? (c) : (c) & 0x7F)
+#define localize(c)  ((is_print(c) || is_cntrl(c) || (unsigned char)(c) >= 0x80) ? (c) : (c) & 0x7F)
 #endif
 
 /* Note STRNDUP works only if src[len] == '\0', ie. len == strlen(src) */
