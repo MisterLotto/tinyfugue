@@ -23,6 +23,7 @@ gencode(CONNECT,	HT_WORLD | HT_XSOCK),
 gencode(DISCONNECT,	HT_WORLD | HT_XSOCK),
 #if ENABLE_GMCP
 gencode(GMCP,		0),
+gencode(GMCP_LOGIN, 0),
 #endif
 gencode(ICONFAIL,	HT_WORLD | HT_XSOCK),
 gencode(KILL,		0),

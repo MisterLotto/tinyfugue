@@ -3632,6 +3632,11 @@ static int handle_socket_input(const char *simbuffer, int simlen, const char *en
                         CLR_TELOPT(xsock, them_tog, rawchar);  /* done */
                     } else {
                         DO(rawchar);  /* acknowledge their request */
+                        #if ENABLE_GMCP
+                            if (rawchar == TN_GMCP && gmcp) {
+                                do_hook(H_GMCP_LOGIN, NULL, "%s", xsock->world->name);
+                            }
+                        #endif
                     }
                 } else {
                     DONT(rawchar);    /* refuse their request */
