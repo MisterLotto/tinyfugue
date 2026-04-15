@@ -5833,6 +5833,9 @@ hooks
                                   (Called if you send the server's disconnect
                                   command (e.g., "QUIT") or [1msocket[22;0m closes, but
                                   not if you use [1m/dc[22;0m.)
+#GMCP_LOGIN
+    GMCP_LOGIN  world             (GMCP subnegotiation after connecting. Useful 
+                                  for sending Char.Login message to server.)
 #KILL
     KILL        pid               ([1mprocess[22;0m ends)
 #LOAD
