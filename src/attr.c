@@ -560,8 +560,19 @@ String *decode_ansi(const char *s, attr_t attrs, int emul, attr_t *final_attrs)
                 if (!*++s) break;
 
 #if WIDECHAR
-        } else if (((ret = mbrtowc(&wc, s, in_len - (s - start), &mbs)) > 0)
-		&& (iswprint(wc) || *s == '\t')) {
+        } else if ((ret = mbrtowc(&wc, s, in_len - (s - start), &mbs)) == (size_t)-1) {
+            /* Invalid UTF-8 byte — treat as Latin-1, re-encode as UTF-8 */
+            unsigned char uc = (unsigned char)*s;
+            int orig_len = dst->len;
+            if (uc >= 0x80) {
+                Stringadd(dst, (char)(0xC0 | (uc >> 6)));
+                Stringadd(dst, (char)(0x80 | (uc & 0x3F)));
+            } else {
+                Stringadd(dst, *s);
+            }
+            memset(&mbs, 0, sizeof(mbs));  /* reset state after error */
+            set_attr(dst, orig_len, &starting_attrs, attrs);
+        } else if ((ret > 0) && (iswprint(wc) || *s == '\t')) {
 #else
         } else if (is_print(*s) || *s == '\t' || (unsigned char)*s >= 0x80) {
 #endif

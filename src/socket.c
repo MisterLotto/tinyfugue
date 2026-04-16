@@ -370,6 +370,18 @@ static void  handle_socket_lines(void);
 #if WIDECHAR
 static int   inbound_decode_str(String *outut, String *input, UConverter *conv, const char cflush);
 static int   inbound_decode(String *output, const char *input, const char *iendptr, UConverter *conv, const char cflush);
+/* ICU callback: treat invalid/unmappable bytes as Latin-1 (U+0080..U+00FF)
+ * rather than substituting U+FFFD.  This handles MUDs that send Latin-1. */
+static void latin1_fallback_cb(const void *context, UConverterToUnicodeArgs *args,
+    const char *codeUnits, int32_t length,
+    UConverterCallbackReason reason, UErrorCode *err)
+{
+    if ((reason == UCNV_ILLEGAL || reason == UCNV_IRREGULAR) && length > 0) {
+        UChar latin1_char = (unsigned char)codeUnits[0];
+        *err = U_ZERO_ERROR;
+        ucnv_cbToUWriteUChars(args, &latin1_char, 1, 0, err);
+    }
+}
 #endif
 static int   handle_socket_input(const char *simbuffer, int simlen, const char* encoding);
 static void  handle_socket_input_queue_lines(Sock *sock);
@@ -1372,6 +1384,7 @@ static Sock *alloc_sock(World *world)
         xsock->incomingfsm = ucnv_open(world->charset, &uerr);
         if (U_FAILURE(uerr))
             core("TN_CHARSET: Could not create UConverter.", __FILE__, __LINE__, 0);
+        ucnv_setToUCallBack(xsock->incomingfsm, latin1_fallback_cb, NULL, NULL, NULL, &uerr);
     }
 #endif
     xsock->fd = -1;
@@ -3302,6 +3315,8 @@ static void telnet_subnegotiation(void)
               temp_buff[p - temp_ptr] = '\0';
               newconvertererr = U_ZERO_ERROR;
               newconverter = ucnv_open(temp_buff, &newconvertererr);
+              if (newconverter)
+                  ucnv_setToUCallBack(newconverter, latin1_fallback_cb, NULL, NULL, NULL, &newconvertererr);
           /* TODO: Check U_MEMORY_ALLOCATION_ERROR and U_FILE_ACCESS_ERROR */
               if (newconverter != NULL) {
                   p = end; /* Prefer the first valid charset! */
@@ -3496,6 +3511,7 @@ static int handle_socket_input(const char *simbuffer, int simlen, const char *en
 	incomingFSM = ucnv_open(encoding, &incomingERR);
 	if (incomingERR == U_MEMORY_ALLOCATION_ERROR || incomingERR == U_FILE_ACCESS_ERROR)
             core("TN_CHARSET: Could not create UConverter.", __FILE__, __LINE__, 0);
+        ucnv_setToUCallBack(incomingFSM, latin1_fallback_cb, NULL, NULL, NULL, &incomingERR);
     }
 #endif
 

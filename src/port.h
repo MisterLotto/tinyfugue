@@ -56,6 +56,9 @@
 
 /* Wide character support */
 #if WIDECHAR
+# ifndef _XOPEN_SOURCE
+#  define _XOPEN_SOURCE 600  /* required for wcwidth() in <wchar.h> */
+# endif
 #include <wctype.h>
 #endif
 

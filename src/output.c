@@ -216,6 +216,47 @@ String status_line[][1] = {	    /* formatted status lines, without alert */
 static StatusField *variable_width_field[max_status_height];
 
 STATIC_BUFFER(outbuf);              /* output buffer */
+
+/* Emit a single byte intended for display.
+ * ASCII bytes (< 0x80) are passed through unchanged.
+ * Latin-1 bytes (0x80-0xFF): on WIDECHAR builds, re-encoded as 2-byte UTF-8;
+ * on non-WIDECHAR builds, transliterated to the closest ASCII equivalent. */
+static void bufputlatin1(char c) {
+    unsigned char uc = (unsigned char)c;
+    if (uc < 0x80) {
+        bufputc(c);
+#if WIDECHAR
+    } else {
+        bufputc((char)(0xC0 | (uc >> 6)));
+        bufputc((char)(0x80 | (uc & 0x3F)));
+#else
+    } else {
+        /* Closest ASCII approximations for Latin-1 0x80-0xFF */
+        static const char *approx[128] = {
+            /* 0x80-0x9F: C1 controls — skip */
+            "","","","","","","","","","","","","","","","",
+            "","","","","","","","","","","","","","","","",
+            /* 0xA0-0xBF */
+            " ","!","c","L","$","Y","|","S","\"","(c)","a","<<",
+            "!","",  "(r)","-","deg","+-","2","3","'","u","P",".",
+            ",","1","o",">>","1/4","1/2","3/4","?",
+            /* 0xC0-0xDF */
+            "A","A","A","A","A","A","AE","C",
+            "E","E","E","E","I","I","I","I",
+            "D","N","O","O","O","O","O","x",
+            "O","U","U","U","U","Y","TH","ss",
+            /* 0xE0-0xFF */
+            "a","a","a","a","a","a","ae","c",
+            "e","e","e","e","i","i","i","i",
+            "d","n","o","o","o","o","o","/",
+            "o","u","u","u","u","y","th","y"
+        };
+        const char *s = approx[uc - 0x80];
+        while (*s) bufputc(*s++);
+#endif
+    }
+}
+
 static int top_margin = -1, bottom_margin = -1;	/* scroll region */
 static int cx = -1, cy = -1;        /* Real cursor ((-1,-1)==unknown) */
 static int ox = 1, oy = 1;          /* Output cursor */
@@ -2271,7 +2312,7 @@ static void ictrl_put(const char *s, int n)
         } else {
             if (attrflag)
                 attributes_off(F_BOLD | F_REVERSE), attrflag = 0;
-            bufputc(c);
+            bufputlatin1(c);
         }
     }
     if (attrflag) attributes_off(F_BOLD | F_REVERSE);
@@ -3006,8 +3047,8 @@ static void hwrite(conString *line, int start, int len, int indent)
 #if WIDECHAR
 	    ret = mbrtowc(NULL, (char *)line->data+i, start + len - i, &is);
 	    if (ret >= (size_t) -2) {
-		/* Invalid character. Punt. */
-		bufputc(ctrl ? CTRL(c) : c);
+		/* Invalid UTF-8 — treat as Latin-1 and re-encode. */
+		bufputlatin1(ctrl ? CTRL(c) : c);
 	    } else {
 		int j = 1;
 		bufputc(c);
@@ -3017,7 +3058,7 @@ static void hwrite(conString *line, int start, int len, int indent)
 		}
 	    }
 #else
-            bufputc(ctrl ? CTRL(c) : c);
+            bufputlatin1(ctrl ? CTRL(c) : c);
 #endif
             col++;
         }
