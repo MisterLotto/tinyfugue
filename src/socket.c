@@ -1202,13 +1202,11 @@ static int fg_sock(Sock *sock, int quiet)
     if (sock == fsock) return 2;  /* already there */
 
     if (fsock) {                          /* the socket being backgrounded... */
-	/* ...has new text */
-        if (fsock->world->screen->nnew || fsock->queue.list.head) {
-	    fsock->world->screen->active = 1;
-            ++active_count;
-            update_status_field(NULL, STAT_ACTIVE);
+	/* reset so only lines arriving after this switch count as new */
+	fsock->world->screen->nnew = 0;
+	fsock->world->screen->nnew_filtered = 0;
 	/* ...is dead, with all text seen */
-        } else if (fsock->constate == SS_ZOMBIE) {
+        if (fsock->constate == SS_ZOMBIE) {
             fsock->constate = SS_DEAD;
 	    dead_socks++;
 	}
