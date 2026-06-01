@@ -304,14 +304,20 @@ static int list_worlds(const Pattern *name, const Pattern *type, TFILE *file,
     STATIC_BUFFER(buf);
 
     if (flags & LW_TABLE) {
-        width = (columns < 80 ? 80 : columns) - 1;
+        /* Lay the table out to the width at which output actually wraps
+         * (%wrapsize, or the screen width if unset) rather than the physical
+         * column count, so the columns stay aligned regardless of %wrapsize. */
+        width = wrapsize ? wrapsize : columns;
+        if (width < 40) width = 40;
         width_name = width / 5;
         width_type = width / 7;
-        width_host = width / 3;
         width_port = 6;
-        tfprintf(file, "%-*s %-*s %*s %-*s %s",
+        /* HOST takes whatever is left after the three separating spaces. */
+        width_host = width - width_name - width_type - width_port - 3;
+        if (width_host < 1) width_host = 1;
+        tfprintf(file, "%-*s %-*s %-*s %*s",
             width_name, "NAME", width_type, "TYPE", width_host, "HOST",
-            width_port, "PORT", "CHARACTER");
+            width_port, "PORT");
     }
 
     /* collect matching worlds */
@@ -332,12 +338,11 @@ static int list_worlds(const Pattern *name, const Pattern *type, TFILE *file,
         if (flags & LW_SHORT) {
             tfputs(p->name, file);
         } else if (flags & LW_TABLE) {
-            tfprintf(file, "%-*.*s %-*.*s %*.*s %-*.*s %s",
+            tfprintf(file, "%-*.*s %-*.*s %-*.*s %*.*s",
                 width_name, width_name, p->name,
                 width_type, width_type, p->type,
                 width_host, width_host, p->host,
-                width_port, width_port, p->port,
-                p->character);
+                width_port, width_port, p->port);
         } else {
             if (p->myhost) need = 9;
             else if (p->flags & ~WORLD_TEMP) need = 8;
