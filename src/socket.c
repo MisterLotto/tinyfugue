@@ -85,6 +85,10 @@ struct sockaddr_in {
 #include "signals.h"
 #include "variable.h"	/* set_var_by_*() */
 
+#if ENABLE_MSDP
+#include "msdp.h"
+#endif
+
 #if WIDECHAR
 #include <wchar.h>
 #endif
@@ -395,6 +399,7 @@ static void  do_naws(Sock *sock);
 static void  telnet_debug(const char *dir, const char *str, int len);
 static void  preferred_telnet_options(void);
 static void  killsock(Sock *sock);
+static void  clear_fd_sets(int fd);
 #if HAVE_SSL
 static int   ssl_check_cert_verify(Sock *sock);
 static int   ssl_verify_callback(int preverify_ok, X509_STORE_CTX *ctx);
@@ -437,6 +442,7 @@ STATIC_BUFFER(telbuf);
 static const char *enum_charset[] = {
     "UTF-8",
     "ISO-8859-1", /* No real support; code passes all chars */
+    "ISO-8859-2", /* Latin-2 (Central European); converted via ICU */
     "US-ASCII",
     "" /* Null-terminated list, so we can loop */
 };
@@ -488,6 +494,8 @@ static const char *enum_charset[] = {
 #define TN_ATCP		((char)200)	/* ATCP */
 /* 201 is not standard. See http://www.aardwolf.com/wiki/index.php/Clients/GMCP */
 #define TN_GMCP		((char)201)	/* GMCP */
+/* 69 is not standard. See https://tintin.mudhalla.net/protocols/msdp/ */
+#define TN_MSDP		((char)69)	/* MSDP */
 /* 102 is not standard. See http://www.aardwolf.com/blog/category/technical */
 #define TN_102	((char)102)	/* Option 102 */
 
@@ -757,6 +765,7 @@ void init_sock(void)
     telnet_label[(UCHAR)TN_COMPRESS2]	= "COMPRESS2";
     telnet_label[(UCHAR)TN_ATCP]	= "ATCP";
     telnet_label[(UCHAR)TN_GMCP]	= "GMCP";
+    telnet_label[(UCHAR)TN_MSDP]	= "MSDP";
     telnet_label[(UCHAR)TN_102]		= "102";
     telnet_label[(UCHAR)TN_EOR]		= "EOR";
     telnet_label[(UCHAR)TN_SE]		= "SE";
@@ -1073,6 +1082,14 @@ void close_all(void)
 int is_active(int fd)
 {
     return FD_ISSET(fd, &active);
+}
+
+static void clear_fd_sets(int fd)
+{
+    FD_CLR(fd, &readers);
+    FD_CLR(fd, &active);
+    FD_CLR(fd, &writers);
+    FD_CLR(fd, &connected);
 }
 
 void readers_clear(int fd)
@@ -1581,8 +1598,11 @@ static void setupnextconn(Sock *sock)
 {
     struct addrinfo *ai, *next = sock->addr;
 
-    if (sock->fd >= 0)
+    if (sock->fd >= 0) {
+	clear_fd_sets(sock->fd);
 	close(sock->fd);
+	sock->fd = -1;
+    }
 retry:
     next = next->ai_next;
     /* if next address is a duplicate of one we've already done, skip it */
@@ -1622,7 +1642,7 @@ static int openconn(Sock *sock)
     if (xsock->constate == SS_RESOLVING) {
 	nbgai_hdr_t info = { 0, 0 };
 	struct addrinfo *ai;
-        FD_CLR(xsock->fd, &readers);
+        clear_fd_sets(xsock->fd);
         if (read(xsock->fd, &info, sizeof(info)) < 0 || info.err != 0) {
             if (!info.err)
                 CONFAIL(xsock, "read", strerror(errno));
@@ -1646,6 +1666,7 @@ static int openconn(Sock *sock)
 	    read(xsock->fd, (char*)xsock->addrs, info.size);
 	}
         close(xsock->fd);
+        xsock->fd = -1;
 # ifdef PLATFORM_UNIX
         if (xsock->pid >= 0)
             if (waitpid(xsock->pid, NULL, 0) < 0)
@@ -2408,8 +2429,7 @@ static void killsock(Sock *sock)
     }
 #endif
     if (sock->fd >= 0) {
-        FD_CLR(sock->fd, &readers);
-        FD_CLR(sock->fd, &writers);
+        clear_fd_sets(sock->fd);
         close(sock->fd);
         sock->fd = -1;
     }
@@ -2817,6 +2837,32 @@ int handle_gmcp_function(conString *string, const char *world)
         telnet_send(telbuf);
     xsock = old_xsock;
         return 1;
+}
+#endif
+
+#if ENABLE_MSDP
+/*
+ * Send an MSDP command given in the human readable syntax accepted by
+ * msdp_encode(), e.g.  msdp("LIST=COMMANDS")  or
+ * msdp("REPORT={ HEALTH MANA }").  The optional second argument selects
+ * the target world.  msdp_encode() produces the full
+ * IAC SB MSDP ... IAC SE frame.
+ */
+int handle_msdp_function(conString *string, const char *world)
+{
+    Sock *old_xsock = xsock;
+    conString *encoded;
+    int sent = 0;
+
+    xsock = (!world || !*world) ? xsock : find_sock(world);
+    if (xsock) {
+        encoded = msdp_encode(string->data);
+        transmit(encoded->data, encoded->len);
+        telnet_debug("sent", encoded->data, encoded->len);
+        sent = 1;
+    }
+    xsock = old_xsock;
+    return sent;
 }
 #endif
 
@@ -3349,6 +3395,18 @@ static void telnet_subnegotiation(void)
 	    do_hook(H_GMCP, NULL, "%s", xsock->subbuffer->data + 3);
 	    break;
 #endif
+#if ENABLE_MSDP
+    case TN_MSDP:
+	{
+	    STATIC_BUFFER(msdp_out);
+	    /* payload starts right after IAC SB MSDP (data+3) and runs to
+	     * the end of the (already IAC-SE-trimmed) subbuffer */
+	    msdp_decode(xsock->subbuffer->data + 3,
+			xsock->subbuffer->len - 3, msdp_out);
+	    do_hook(H_MSDP, NULL, "%s", msdp_out->data);
+	}
+	    break;
+#endif
 #if ENABLE_OPTION102
     case TN_102:
 	    do_hook(H_OPTION102, NULL, "%s", xsock->subbuffer->data + 3);
@@ -3786,6 +3844,9 @@ static int handle_socket_input(const char *simbuffer, int simlen, const char *en
 #if ENABLE_GMCP
 		    (rawchar == TN_GMCP && gmcp) ||
 #endif
+#if ENABLE_MSDP
+		    (rawchar == TN_MSDP && msdp) ||
+#endif
 #if ENABLE_OPTION102
 		    (rawchar == TN_102 && OPTION102) ||
 #endif
@@ -4197,6 +4258,17 @@ static void preferred_telnet_options(void)
 {
     SET_TELOPT(xsock, us_tog, TN_NAWS);
     WILL(TN_NAWS);
+#if ENABLE_MSDP
+    /*
+     * Some servers only advertise MSDP after the client shows interest,
+     * so proactively request it.  The server's WILL MSDP is accepted in
+     * the TN_WILL handler above (guarded by the `msdp` setting).
+     */
+    if (msdp) {
+	SET_TELOPT(xsock, them_tog, TN_MSDP);
+	DO(TN_MSDP);
+    }
+#endif
 #if 0
     SET_TELOPT(xsock, us_tog, TN_BINARY);
     WILL(TN_BINARY);		/* allow us to send 8-bit data */

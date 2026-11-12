@@ -16,20 +16,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.12', '3.13']
+        python-version: ['3.12', '3.13', '3.14', '3.15.0-rc.2']
         opts:
           - "--enable-lua"
           - "--enable-python"
           - "--disable-widechar"
-#          - "--enable-lua --enable-python"
+          - "--enable-msdp"
     
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install packages on Linux
-        run: sudo apt-get install lua5.4 liblua5.4-dev libpcre3-dev
+        run: sudo apt-get install lua5.4 liblua5.4-dev libpcre3-dev flex
       - name: Configure
         run: ./configure --enable-version --enable-symlink --enable-atcp --enable-gmcp --enable-option102 ${{ matrix.opts }}
       - name: Build
@@ -43,15 +43,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.12', '3.13']
+        python-version: ['3.14']
         opts:
 #          - "--enable-lua"
           - "--enable-python"
           - "--disable-widechar"
-    #          - "--enable-lua --enable-python"
+          - "--enable-msdp"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install packages on MacOS
         run: |
           brew install lua pcre2 python@${{ matrix.python-version }}
@@ -73,7 +73,7 @@ jobs:
         run: |
           git config --global core.autocrlf false
           git config --global core.eol lf
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v7
       - uses: egor-tensin/setup-cygwin@v1
         with:
           platform: x86
