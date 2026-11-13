@@ -29,6 +29,7 @@
 
 #if WIDECHAR
 #include <unicode/ucnv.h>
+#include <unicode/ucnv_cb.h>	/* ucnv_cbToUWriteUChars() in latin1_fallback_cb */
 #include <unicode/ustring.h>
 #endif
 
