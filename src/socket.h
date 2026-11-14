@@ -58,6 +58,8 @@ extern int     sockecho(void);
 extern int     is_active(int fd);
 extern void    readers_clear(int fd);
 extern void    readers_set(int fd);
+extern void    writers_clear(int fd);
+extern void    writers_set(int fd);
 extern struct timeval *socktime(const char *name, int dir);
 extern int     tog_bg(Var *var);
 extern int     tog_keepalive(Var *var);

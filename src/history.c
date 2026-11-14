@@ -126,6 +126,22 @@ static void save_to_hist(History *hist, conString *line)
     line->links++;
 }
 
+#if ENABLE_SQUAT
+/* Call cb for the most recent maxlines lines of hist, oldest first. */
+void history_foreach(const History *hist,
+    void (*cb)(const conString *line, void *u), void *u, int maxlines)
+{
+    int i, start;
+
+    if (!hist || !hist->cq.data) return;
+    start = hist->cq.total - hist->cq.size;
+    if (maxlines > 0 && hist->cq.total - start > maxlines)
+	start = hist->cq.total - maxlines;
+    for (i = start; i < hist->cq.total; i++)
+	cb(CS(histline(hist, i)), u);
+}
+#endif
+
 static void save_to_log(History *hist, const conString *str)
 {
      int i_s = 0;

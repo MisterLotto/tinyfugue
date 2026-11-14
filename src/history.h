@@ -23,6 +23,11 @@ extern String*history_sub(String *line);
 extern void   sync_input_hist(void);
 extern int    do_recall(String *args, int offset);
 extern long   hist_getsize(const struct History *w);
+#if ENABLE_SQUAT
+extern void   history_foreach(const struct History *hist,
+                  void (*cb)(const conString *line, void *u), void *u,
+                  int maxlines);
+#endif
 
 #if USE_DMALLOC
 extern void   free_histories(void);

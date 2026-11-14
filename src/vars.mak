@@ -18,7 +18,7 @@
 
 SOURCE = attr.c command.c dstring.c expand.c expr.c help.c history.c \
   keyboard.c macro.c main.c malloc.c output.c process.c search.c \
-  restart.c signals.c socket.c tfio.c tty.c util.c variable.c world.c \
+  restart.c signals.c socket.c squat.c tfio.c tty.c util.c variable.c world.c \
   $(LUA_SOURCES) \
   $(MSDP_SOURCES) \
   tfpython.c
@@ -26,6 +26,6 @@ SOURCE = attr.c command.c dstring.c expand.c expr.c help.c history.c \
 OBJS = attr.$O command.$O dstring.$O expand.$O expr.$O help.$O history.$O \
   keyboard.$O macro.$O main.$O malloc.$O output.$O pattern.$O process.$O \
   restart.$O \
-  search.$O signals.$O socket.$O tfio.$O tty.$O util.$O variable.$O world.$O \
+  search.$O signals.$O socket.$O squat.$O tfio.$O tty.$O util.$O variable.$O world.$O \
   $(LUA_OBJECTS) $(MSDP_OBJECTS) tfpython.$O $(OTHER_OBJS)
 

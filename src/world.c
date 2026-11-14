@@ -205,6 +205,94 @@ int nuke_world(World *w)
     return 1;
 }
 
+#if ENABLE_SQUAT
+/* ---- remote world editing (squat.c) ------------------------------------ */
+
+static void squat_setstr(char **field, const char *value)
+{
+    if (*field) FREE(*field);
+    *field = (value && *value) ? STRDUP(value) : NULL;
+}
+
+/* Create or edit a world record on behalf of a remote client.  Unlike
+ * new_world() this can CLEAR fields.  pass_mode: 0 keep the stored password,
+ * 1 set it to pass, 2 clear it.  Returns 1 if created, 0 if edited, -1 on
+ * error (message in err). */
+int squat_world_put(const char *name, const char *host, const char *port,
+    const char *type, const char *character, const char *pass, int pass_mode,
+    const char *mfile, int ssl, int echo, const char *charset,
+    char *err, size_t errlen)
+{
+    World *w;
+    int flags = (ssl ? WORLD_SSL : 0) | (echo ? WORLD_ECHO : 0);
+    int created = 0;
+
+    if (!name || !*name || strchr(name, ' ') || *name == '(' ||
+	cstrcmp(name, "default") == 0)
+    {
+	snprintf(err, errlen, "illegal world name");
+	return -1;
+    }
+    if ((!*host && *port) || (*host && !*port)) {
+	snprintf(err, errlen, "host and port must be both blank or both set");
+	return -1;
+    }
+#if WIDECHAR
+    if (charset && *charset) {
+	/* an unknown charset would make TF abort when it connects */
+	UErrorCode uerr = U_ZERO_ERROR;
+	UConverter *c = ucnv_open(charset, &uerr);
+	if (!c || U_FAILURE(uerr)) {
+	    if (c) ucnv_close(c);
+	    snprintf(err, errlen, "unknown character set");
+	    return -1;
+	}
+	ucnv_close(c);
+    }
+#endif
+    if (!(w = find_world(name))) {
+	w = new_world(name, type, host, port, character,
+	    pass_mode == 1 ? pass : "", mfile, flags, "");
+	if (!w) {
+	    snprintf(err, errlen, "TinyFugue refused the world definition");
+	    return -1;
+	}
+	created = 1;
+    } else {
+	if (w->flags & WORLD_TEMP) {
+	    snprintf(err, errlen, "cannot edit a temporary world");
+	    return -1;
+	}
+	squat_setstr(&w->host, host);
+	squat_setstr(&w->port, port);
+	squat_setstr(&w->type, type);
+	squat_setstr(&w->character, character);
+	squat_setstr(&w->mfile, mfile);
+	if (pass_mode == 1) squat_setstr(&w->pass, pass);
+	else if (pass_mode == 2) squat_setstr(&w->pass, NULL);
+	w->flags = (w->flags & ~(WORLD_SSL | WORLD_ECHO)) | flags;
+	do_hook(H_REDEF, "!Redefined %s %s", "%s %s", "world", w->name);
+    }
+#if WIDECHAR
+    if (charset && *charset) {
+	if (w->charset) FREE(w->charset);
+	w->charset = STRDUP(charset);
+    }
+#endif
+    return created;
+}
+
+/* Delete a world record.  0 ok, -1 no such world, -2 in use. */
+int squat_world_del(const char *name)
+{
+    World *w = find_world(name);
+
+    if (!w || (w->flags & WORLD_TEMP)) return -1;
+    if (w->sock) return -2;
+    return nuke_world(w) ? 0 : -2;
+}
+#endif /* ENABLE_SQUAT */
+
 struct Value *handle_unworld_command(String *args, int offset)
 {
     World *w;
