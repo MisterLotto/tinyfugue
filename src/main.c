@@ -62,6 +62,7 @@ const char contrib[] =
 #endif
 
 int restriction = 0;
+int squat_sandbox = 0;	/* >0 while an uploaded script (or one of its macros) runs: see squat.c */
 int debug = 0;
 
 static void read_configuration(const char *fname);

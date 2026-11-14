@@ -57,6 +57,7 @@ struct Macro {
     subattr_t *subattr;
     short prob, shots, invis;
     short flags;
+    unsigned char sandbox;		/* defined by an uploaded script: always runs restricted */
     signed char fallthru, quiet;
     struct BuiltinCmd *builtin;		/* builtin cmd with same name, if any */
     int used[USED_N];			/* number of calls by each method */
@@ -213,6 +214,7 @@ static Macro *macro_spec(String *args, int offset, int *xmflag, ListOpts *listop
         return NULL;
     }
     spec->num = 0;
+    spec->sandbox = squat_sandbox > 0;	/* /def inside an uploaded script: always runs restricted */
     spec->body = spec->expr = NULL;
     spec->prog = spec->exprprog = NULL;
     spec->name = spec->bind = spec->keyname = NULL;
@@ -694,6 +696,7 @@ int add_new_macro(const char *trig, const char *bind, const hookvec_t *hook,
     new->fallthru = FALSE;
     new->quiet = FALSE;
     new->builtin = NULL;
+    new->sandbox = squat_sandbox > 0;
     new->used[USED_NAME] = new->used[USED_TRIG] =
 	new->used[USED_HOOK] = new->used[USED_KEY] = 0;
 
@@ -1494,7 +1497,7 @@ struct Value *handle_list_command(String *args, int offset)
 int do_macro(Macro *macro, String *args, int offset, int used_type,
     int kbnumlocal)
 {
-    int result, old_invis_flag, oldblock;
+    int result, old_invis_flag, oldblock, oldrestr = 0;
     const char *command;
     char numbuf[16];
 
@@ -1509,6 +1512,12 @@ int do_macro(Macro *macro, String *args, int offset, int used_type,
     }
     old_invis_flag = invis_flag;
     invis_flag = macro->invis;
+    if (macro->sandbox) {
+	/* from an uploaded script: run with shell, files, new connections and Lua off */
+	oldrestr = restriction;
+	squat_sandbox++;
+	if (restriction < SANDBOX_LEVEL) restriction = SANDBOX_LEVEL;
+    }
     oldblock = block; /* XXX ? */
     block = 0; /* XXX ? */
     if (!macro->prog) {
@@ -1522,6 +1531,10 @@ int do_macro(Macro *macro, String *args, int offset, int used_type,
 	result = 0;
     else
 	result = prog_run(macro->prog, args, offset, command, kbnumlocal);
+    if (macro->sandbox) {
+	squat_sandbox--;
+	if (restriction == SANDBOX_LEVEL && oldrestr < SANDBOX_LEVEL) restriction = oldrestr;
+    }
     invis_flag = old_invis_flag;
     block = oldblock; /* XXX ? */
     return result;

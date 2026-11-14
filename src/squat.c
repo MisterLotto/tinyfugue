@@ -33,11 +33,13 @@
 #include "expand.h"
 #include "world.h"
 #include "squat.h"
+#include "command.h"
 
 #if ENABLE_SQUAT
 
 #include <ctype.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -140,7 +142,62 @@ static int var_on(const char *name)
     return v && *v && strcmp(v, "0") && strcmp(v, "off") && strcmp(v, "no");
 }
 
-static int exec_on(void) { return var_on("squat_exec"); }
+/* squat_exec: off (default) | allow (only the commands in squat_exec_allow) | on (any command). */
+#define EXEC_OFF 0
+#define EXEC_ALLOW 1
+#define EXEC_ON 2
+#define EXEC_ALLOW_DEFAULT "version listworlds listsockets listdef listvar recall help"
+
+static int exec_mode(void)
+{
+    const char *v = getvar("squat_exec");
+    if (!v || !*v || !strcmp(v, "0") || !strcmp(v, "off") || !strcmp(v, "no")) return EXEC_OFF;
+    if (!strcmp(v, "allow")) return EXEC_ALLOW;
+    return EXEC_ON;
+}
+
+/* squat_scripts: off (default) | safe (sandboxed: no shell, files, new connections or Lua,
+ * also later when its macros run) | on (runs with TinyFugue's own rights).
+ * Uploaded scripts are files in <squat_dir>/scripts. */
+#define SCRIPTS_OFF 0
+#define SCRIPTS_SAFE 1
+#define SCRIPTS_ON 2
+static char squat_scripts_dir[1100];
+
+static int scripts_mode(void)
+{
+    const char *v = getvar("squat_scripts");
+    if (!v || !*v || !strcmp(v, "0") || !strcmp(v, "off") || !strcmp(v, "no")) return SCRIPTS_OFF;
+    if (!strcmp(v, "safe")) return SCRIPTS_SAFE;
+    return SCRIPTS_ON;
+}
+
+/* Any exec at all (the features list, the macro-file check's second half). */
+static int exec_on(void) { return exec_mode() != EXEC_OFF; }
+
+/* Is this command line permitted in allow mode? Only a plain "/name args" whose
+ * name is in squat_exec_allow: no command chaining (%;), no control characters,
+ * no leading "/@"-style prefixes. */
+static int exec_allowed(const char *line)
+{
+    const char *list = getvar("squat_exec_allow");
+    const char *p, *e;
+    size_t n;
+    if (!list || !*list) list = EXEC_ALLOW_DEFAULT;
+    if (strstr(line, "%;")) return 0;
+    for (p = line; *p; p++) if ((unsigned char)*p < 0x20) return 0;
+    p = line + 1;
+    for (e = p; *e && *e != ' ' && *e != '\t'; e++) ;
+    n = (size_t)(e - p);
+    if (n == 0) return 0;
+    for (p = list; *p; ) {
+	while (*p == ' ' || *p == '\t') p++;
+	for (e = p; *e && *e != ' ' && *e != '\t'; e++) ;
+	if ((size_t)(e - p) == n && !strncasecmp(p, line + 1, n)) return 1;
+	p = e;
+    }
+    return 0;
+}
 
 static const char *var_or_default(const char *name, const char *dflt)
 {
@@ -573,8 +630,8 @@ static void update_status(void)
 
 static const char *hello_features(void)
 {
-    static char f[112];
-    snprintf(f, sizeof f, "lines,control,worlds,worldedit%s%s%s%s",
+    static char f[128];
+    snprintf(f, sizeof f, "lines,control,worlds,worldedit%s%s%s%s%s",
 #if ENABLE_GMCP
 	",gmcp",
 #else
@@ -585,7 +642,8 @@ static const char *hello_features(void)
 #else
 	"",
 #endif
-	exec_on() ? ",exec" : "", policy_mode() == POLICY_ASK ? ",ask" : "");
+	exec_on() ? ",exec" : "", policy_mode() == POLICY_ASK ? ",ask" : "",
+	scripts_mode() != SCRIPTS_OFF ? ",scripts" : "");
     return f;
 }
 
@@ -873,9 +931,9 @@ static void cmd_world_put(char **f, int nf)
     if (nf < 15) { reply_err(nf > 1 ? f[1] : "", "bad_request", "WORLD_PUT needs 14 fields"); return; }
     mode = !strcmp(f[7], "set") ? 1 : !strcmp(f[7], "clear") ? 2 : 0;
     if (!strcmp(f[13], "set")) {
-	/* a macro file is code TF loads on connect: only with squat_exec */
-	if (!exec_on()) {
-	    reply_err(f[1], "forbidden", "setting a macro file needs squat_exec to be on in TinyFugue");
+	/* a macro file is code TF loads on connect: only with squat_exec=on (not allow) */
+	if (exec_mode() != EXEC_ON) {
+	    reply_err(f[1], "forbidden", "setting a macro file needs squat_exec=on in TinyFugue");
 	    return;
 	}
     } else if ((w = find_world(f[2]))) {
@@ -911,7 +969,41 @@ static int run_tf_command(const char *line)
 #define EXEC_MAX_BYTES (60 * 1024)
 
 /* EXEC reqid line: run it and send back what it printed. */
+static void exec_captured(const char *reqid, const char *cmdline, int sandboxed_load);
+
 static void cmd_exec(char **f, int nf)
+{
+    if (nf < 3) { reply_err(nf > 1 ? f[1] : "", "bad_request", "EXEC needs 2 fields"); return; }
+    if (!exec_on()) {
+	reply_err(f[1], "forbidden", "remote commands are off: /set squat_exec=on in TinyFugue");
+	return;
+    }
+    if (f[2][0] != '/') { reply_err(f[1], "bad_request", "a command must start with /"); return; }
+    if (exec_mode() == EXEC_ALLOW && !exec_allowed(f[2])) {
+	reply_err(f[1], "forbidden", "that command is not in squat_exec_allow in TinyFugue (squat_exec=allow)");
+	return;
+    }
+    exec_captured(f[1], f[2], 0);
+}
+
+/* Load an uploaded script with shell, files, new connections and Lua off. Every macro it
+ * defines is flagged and keeps running that way (see do_macro). The level is put back
+ * afterwards unless the script raised it itself (which cannot be undone). */
+static int sandbox_load(const char *path, int sandboxed)
+{
+    int old = restriction, ok;
+    if (!sandboxed) return do_file_load(path, FALSE, NULL) > 0;
+    squat_sandbox++;
+    if (restriction < SANDBOX_LEVEL) restriction = SANDBOX_LEVEL;
+    ok = do_file_load(path, FALSE, NULL) > 0;
+    squat_sandbox--;
+    if (restriction == SANDBOX_LEVEL && old < SANDBOX_LEVEL) restriction = old;
+    return ok;
+}
+
+/* Run a TinyFugue command line and send back OK reqid ok out... (ok=0 when it
+ * printed anything on the error stream). The caller has already checked policy. */
+static void exec_captured(const char *reqid, const char *cmdline, int sandboxed_load)
 {
     TFILE *q, *qe, *old_out, *old_err;
     String *ln;
@@ -919,12 +1011,6 @@ static void cmd_exec(char **f, int nf)
     int ok, lines = 0, had_error = 0;
     size_t bytes = 0;
 
-    if (nf < 3) { reply_err(nf > 1 ? f[1] : "", "bad_request", "EXEC needs 2 fields"); return; }
-    if (!exec_on()) {
-	reply_err(f[1], "forbidden", "remote commands are off: /set squat_exec=on in TinyFugue");
-	return;
-    }
-    if (f[2][0] != '/') { reply_err(f[1], "bad_request", "a command must start with /"); return; }
     /* TinyFugue reports a failed command as a message on its error stream and
      * still returns success, so keep the two streams apart: anything on the
      * error stream (an error or a warning) makes ok false. */
@@ -934,7 +1020,8 @@ static void cmd_exec(char **f, int nf)
     old_err = tferr;
     tfout = q;
     tferr = qe;
-    ok = run_tf_command(f[2]);
+    if (sandboxed_load) ok = sandbox_load(cmdline, sandboxed_load == 1);
+    else ok = run_tf_command((char *)cmdline);
     tfout = old_out;
     tferr = old_err;
     (ln = Stringnew(NULL, 0, 0))->links++;
@@ -955,8 +1042,8 @@ static void cmd_exec(char **f, int nf)
 	    }
 	}
 	buf_str(&b, "OK");
-	buf_field(&b, f[1]);
-	buf_field(&b, (ok && !had_error) ? "1" : "0");
+	buf_field(&b, reqid);
+	buf_field(&b, (ok && (sandboxed_load || !had_error)) ? "1" : "0"); /* a load reports its own result; its notices are not errors */
 	if (lbuf.len) buf_put(&b, lbuf.p, lbuf.len);
 	buf_free(&lbuf);
     }
@@ -965,6 +1052,48 @@ static void cmd_exec(char **f, int nf)
     tfclose(qe);
     send_msg(&b);
     buf_free(&b);
+}
+
+
+/* Is a script upload / load permitted right now? On refusal sends the reply and returns 0. */
+static int script_gate(const char *reqid)
+{
+    switch (scripts_mode()) {
+    case SCRIPTS_OFF:
+	reply_err(reqid, "forbidden", "script upload is off: /set squat_scripts=safe (or on) in TinyFugue");
+	return 0;
+    case SCRIPTS_SAFE:
+	break;
+    }
+    return 1;
+}
+
+/* SCRIPT reqid check | load path : the bridge has put (or is about to put) a file in
+ * the scripts directory. check = may a script be uploaded now; load = /load it.
+ * Only a file that really is inside the scripts directory is ever loaded. */
+static void cmd_script(char **f, int nf)
+{
+    char real[PATH_MAX + 1], base[PATH_MAX + 1];
+    size_t n;
+    const char *p;
+
+    if (nf < 3) { reply_err(nf > 1 ? f[1] : "", "bad_request", "SCRIPT needs 2 fields"); return; }
+    if (!script_gate(f[1])) return;
+    if (!strcmp(f[2], "check")) { reply_ok(f[1]); return; }
+    if (strcmp(f[2], "load") || nf < 4) { reply_err(f[1], "bad_request", "SCRIPT: check or load <path>"); return; }
+    for (p = f[3]; *p; p++)
+	if ((unsigned char)*p < 0x20) { reply_err(f[1], "bad_request", "bad path"); return; }
+    if (!squat_scripts_dir[0] || !realpath(squat_scripts_dir, base) || !realpath(f[3], real)) {
+	reply_err(f[1], "no_such_script", "no such script");
+	return;
+    }
+    n = strlen(base);
+    if (strncmp(real, base, n) != 0 || real[n] != '/' || strchr(real + n + 1, '/')) {
+	reply_err(f[1], "forbidden", "only files directly in the scripts directory can be loaded");
+	return;
+    }
+    /* safe: the script is sandboxed; on: it runs with TinyFugue's own rights */
+    exec_captured(f[1], real, scripts_mode() == SCRIPTS_SAFE ? 1 : 2);
 }
 
 static void handle_message(char *line)
@@ -1073,6 +1202,7 @@ static void handle_message(char *line)
 	return;
     }
     if (!strcmp(f[0], "EXEC")) { cmd_exec(f, nf); return; }
+    if (!strcmp(f[0], "SCRIPT")) { cmd_script(f, nf); return; }
     if (!strcmp(f[0], "RESIZE")) {
 	/* RESIZE sid cols rows */
 	if (nf >= 4 && sid_lookup(f[1], &s))
@@ -1231,6 +1361,8 @@ static int squat_start(void)
 	snprintf(dir, sizeof dir, "%s/.tf-squatter", home ? home : ".");
     }
     mkdir(dir, 0700);
+    snprintf(squat_scripts_dir, sizeof squat_scripts_dir, "%s/scripts", dir);
+    mkdir(squat_scripts_dir, 0700);
     snprintf(logpath, sizeof logpath, "%s/bridge.log", dir);
 
     argv[argc++] = (char *)bin;
@@ -1339,6 +1471,7 @@ static void squat_usage(void)
 
 struct Value *handle_squat_command(String *args, int offset)
 {
+    if (squat_sandbox > 0) { eprintf("restricted"); return 0; }
     char *cmd = args->data + offset, *arg;
     char word[32];
     size_t n = 0;
@@ -1427,6 +1560,7 @@ static struct Value *control_answer(const char *p)
 
 struct Value *handle_control_command(String *args, int offset)
 {
+    if (squat_sandbox > 0) { eprintf("restricted"); return 0; }
     char *p = args->data + offset;
     char world[128], w2[32], w3[32];
     struct control_ctx c;

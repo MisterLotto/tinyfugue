@@ -536,6 +536,10 @@ Var *set_str_var_by_namehash(const char *name, unsigned int hash,
 /* For type safety, we use a typed value, not a void*. */
 Var *setvar(Var *var, Value *value, int exportflag)
 {
+    if (squat_sandbox > 0 && var->val.name && !strncmp(var->val.name, "squat_", 6)) {
+	eprintf("restricted");	/* an uploaded script may not loosen the remote-access settings */
+	return var;
+    }
     if (var->flags & VARSPECIAL) { /* can't happen if var is new */
 	if (!set_special_var(var, value, 1, exportflag))
 	    return NULL;

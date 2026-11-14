@@ -54,7 +54,9 @@ Settings are ordinary variables read when `/squat on` runs (and some when used):
 | `squat_log` | `info` | `debug` logs every message between TF and the helper |
 | `squat_takeover` | `auto` | `auto` lets a paired operator take over, `ask` asks you first, `off` refuses |
 | `squat_ask_timeout` | `30` | seconds before an unanswered `ask` is refused |
-| `squat_exec` | off | allow admin devices to run TF commands remotely (`tf.exec`); also needed to set a world's macro file |
+| `squat_exec` | off | remote TF commands for admin devices (`tf.exec`): `off`, `allow` (only the commands in `squat_exec_allow`) or `on` (any command: this equals a shell on the machine, see below) |
+| `squat_exec_allow` | `version listworlds listsockets listdef listvar recall help` | space-separated command names permitted when `squat_exec=allow` |
+| `squat_scripts` | off | uploaded scripts (`tf.script.put`, admin devices): `off`, `safe` (sandboxed, see below) or `on` (TinyFugue's own rights) |
 | `squat_disp` | off | also send the post-trigger display text of each line |
 | `squat_mtts` | off | `on`: answer the terminal-type request with a standard `MTTS` capability reply (UTF-8, colours TF supports); `client`: also claim 256 colours and truecolor for the remote client. Read when a connection starts. Games that read only the first reply are unaffected |
 
@@ -84,7 +86,35 @@ Each world has two independent switches:
   write-only; a macro file (code TF loads on connect) can only be set by an
   admin device and only while `squat_exec` is on.
 * `tf.exec` runs a TF command for an admin device and returns its output. It is
-  off unless you `/set squat_exec=on`.
+  off unless you set `squat_exec`:
+  * `allow`: only the commands named in `squat_exec_allow` (default: read-only
+    ones). A line is refused if it chains commands (`%;`), holds control
+    characters, or starts with any other command. Setting a world's macro file
+    is refused too.
+  * `on`: any command. Treat it as shell access to the account TinyFugue runs
+    as: TinyFugue can run programs (`/sh`, `/quote !`), load files and define
+    macros, and a command can reach all of that indirectly (`/eval`, `/def`).
+    **A deny-list cannot make `on` safe; use `allow`.**
+  Only an admin device can use it at all, and the enforcement is in TinyFugue,
+  not in the bridge or the client. What a remote device *types into a game* is
+  never run as a TinyFugue command: it goes to the game verbatim. There is no way
+  to send TinyFugue code or files through the bridge other than `tf.exec`.
+
+## Uploaded scripts
+
+An admin device can send a macro file (`tf.script.put`): the bridge stores it in
+`<squat_dir>/scripts/` and TinyFugue loads it, when `squat_scripts` allows.
+
+* `safe` runs the script **sandboxed**: while it loads, and every time a macro it
+  defined runs later (a trigger, a hook, a timer), TinyFugue behaves as under
+  `/restrict world`: no `/sh`, `/quote !` or pipes, no file access (`/log`, `/save`,
+  `/lcd`, `/load`), no connections to hosts that are not defined worlds, and no Lua
+  (`/calllua`, `/loadlua`). The script cannot run `/restrict`, `/squat`, `/control`, or
+  change any `squat_*` variable, so it cannot loosen these settings. TinyFugue's own
+  restriction level is unchanged and its keyboard is not affected.
+* `on` loads it with TinyFugue's own rights: treat it like a file you wrote.
+* Only files directly inside the scripts directory are ever loaded, whatever a client sends.
+* Removing a script removes the file; the macros it defined remain until `/undef`.
 
 ## Tests
 
