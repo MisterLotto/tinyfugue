@@ -60,6 +60,17 @@ extern World *new_world(const char *name, const char *type,
     const char *myhost);
 extern int    nuke_world(World *w);
 extern World *find_world(const char *name);
+#if ENABLE_SQUAT
+extern int    squat_world_put(const char *name, const char *host,
+                  const char *port, const char *type, const char *character,
+                  const char *pass, int pass_mode, const char *mfile, int ssl,
+                  int echo, const char *charset, char *err, size_t errlen);
+extern int    squat_world_del(const char *name);
+extern int    rename_world_record(const char *oldname, const char *newname,
+    char *err, size_t errlen);
+extern int    squat_world_rename(const char *oldname, const char *newname,
+    char *err, size_t errlen);
+#endif
 extern void   mapworld(void (*func)(struct World *world));
 
 #if USE_DMALLOC

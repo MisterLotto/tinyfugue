@@ -20,6 +20,7 @@
 #include "tfio.h"
 #include "macro.h"	/* Macro, find_macro(), do_macro()... */
 #include "keyboard.h"
+#include "squat.h"
 #include "output.h"	/* iput(), idel(), redraw()... */
 #include "history.h"	/* history_sub() */
 #include "expand.h"	/* macro_run() */
@@ -207,7 +208,13 @@ int handle_keyboard_input(int read_flag)
 		kbnum_internal = kbnumlocal = atoi(kbnum->data);
 		reset_kbnum();
 	    }
+#if ENABLE_SQUAT
+            squat_kbd_depth++;
+#endif
             do_macro(macro, NULL, 0, USED_KEY, kbnumlocal);
+#if ENABLE_SQUAT
+            squat_kbd_depth--;
+#endif
 	    kbnum_internal = 0;
         } /* else, partial match; just hold on to it for now. */
     }
@@ -493,7 +500,13 @@ int handle_input_line(void)
     gettime(&line->time);
     record_input(CS(line));
     readsafe = 1;
+#if ENABLE_SQUAT
+    squat_kbd_depth++;	/* keyboard-originated: may be locked out */
+#endif
     result = macro_run(CS(line), 0, NULL, 0, sub, "\bUSER");
+#if ENABLE_SQUAT
+    squat_kbd_depth--;
+#endif
     readsafe = 0;
     return result;
 }

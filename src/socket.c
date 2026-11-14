@@ -82,6 +82,7 @@ struct sockaddr_in {
 #include "macro.h"
 #include "keyboard.h"
 #include "cmdlist.h"
+#include "squat.h"
 #include "command.h"
 #include "signals.h"
 #include "variable.h"	/* set_var_by_*() */
@@ -336,6 +337,14 @@ typedef struct Sock {		/* an open connection to a server */
     char fsastate;		/* parser finite state automaton state */
     char substate;		/* parser fsa state for telnet subnegotiation */
     pid_t pid;			/* OS pid of name resolution process */
+#if ENABLE_SQUAT
+    unsigned long squat_serial;	/* unique per connection; 0 until reported */
+    unsigned char squat_input;	/* SQUAT_INPUT_*: who may send to the game */
+    unsigned char squat_auto;	/* SQUAT_AUTO_*: who runs triggers */
+    unsigned int squat_cols, squat_rows; /* controller's window size, 0 = none */
+    unsigned int squat_prompt_len;	/* partial-line length already reported */
+    struct timeval squat_start;	/* when this connection began */
+#endif
 #if HAVE_MCCP
     z_stream *zstream;		/* state of compressed stream */
 #endif
@@ -877,6 +886,17 @@ void main_loop(void)
         if (prompt_timeout.tv_sec > 0) {
 	    set_min_earliest(prompt_timeout);
 	}
+#if ENABLE_SQUAT
+        if (squat_fd >= 0 && (squat_prompt_pending() || squat_ask_pending())) {
+	    struct timeval squat_delay = { 0, 150000 }, squat_wake;
+	    tvadd(&squat_wake, &now, &squat_delay);
+	    set_min_earliest(squat_wake);
+	}
+#endif
+
+#if ENABLE_SQUAT
+        squat_tick();
+#endif
 
         /* flush pending display_screen output */
         /* must be after all possible output and before select() */
@@ -965,6 +985,26 @@ void main_loop(void)
                     FD_CLR(STDIN_FILENO, &readers);
                 }
             }
+
+#if ENABLE_SQUAT
+            /* remote-control bridge (see squat.c) */
+            if (squat_fd >= 0 && FD_ISSET(squat_fd, &active)) {
+                count--;
+                squat_readable();
+            }
+            if (squat_fd >= 0 && FD_ISSET(squat_fd, &connected)) {
+                count--;
+                squat_writable();
+            }
+            if (squat_cand_fd >= 0 && FD_ISSET(squat_cand_fd, &active)) {
+                count--;
+                squat_cand_readable();
+            }
+            if (squat_rv_fd >= 0 && FD_ISSET(squat_rv_fd, &active)) {
+                count--;
+                squat_rv_readable();
+            }
+#endif
 
             /* Check for socket completion/activity.  We pick up where we
              * left off last time, so sockets near the end of the list aren't
@@ -1103,6 +1143,17 @@ void readers_set(int fd)
 {
     FD_SET(fd, &readers);
     if (fd >= nfds) nfds = fd + 1;
+}
+
+void writers_set(int fd)
+{
+    FD_SET(fd, &writers);
+    if (fd >= nfds) nfds = fd + 1;
+}
+
+void writers_clear(int fd)
+{
+    FD_CLR(fd, &writers);
 }
 
 int tog_bg(Var *var)
@@ -1423,6 +1474,14 @@ static Sock *alloc_sock(World *world)
     gettime(&xsock->time[SOCK_SEND]);
     xsock->time[SOCK_RECV] = xsock->time[SOCK_SEND];
     xsock->numquiet = 0;
+#if ENABLE_SQUAT
+    xsock->squat_serial = 0;
+    xsock->squat_input = SQUAT_INPUT_TF;
+    xsock->squat_auto = SQUAT_AUTO_TF;
+    xsock->squat_cols = xsock->squat_rows = 0;
+    xsock->squat_prompt_len = 0;
+    xsock->squat_start = xsock->time[SOCK_SEND];
+#endif
 
     return xsock;
 }
@@ -2994,6 +3053,10 @@ int send_line(const char *src, unsigned int len, int eol_flag)
         return 0;
     }
 
+#if ENABLE_SQUAT
+    if (squat_sock_gate()) return 0;
+#endif
+
     if (xsock && xsock->prompt) {
         /* Not the same as unprompt(): we keep attrs, and delete buffer. */
 	if (!(xsock->flags & SOCKPROMPT)) {
@@ -3009,10 +3072,28 @@ int send_line(const char *src, unsigned int len, int eol_flag)
         if (xsock == fsock) update_prompt(xsock->prompt, 1);
     }
 
-    if (secho) {
+#if ENABLE_SQUAT
+    if (squat_active() && !squat_silent) {
+	SquatSock ss;
+	if (squat_sock_describe(xsock, &ss))
+	    squat_line(&ss, SQUAT_KIND_ECHO, 0, squat_origin_name(), src, len);
+    }
+#endif
+    if (secho
+#if ENABLE_SQUAT
+	&& !squat_silent
+#endif
+	)
+    {
 	String *str = Stringnew(NULL, 0, 0);
 	Sprintf(str, "%S%.*s%A", sprefix, len, src, getattrvar(VAR_secho_attr));
+#if ENABLE_SQUAT
+	squat_skip_output = 1;	/* already sent as an echo line */
+#endif
 	world_output(xsock->world, CS(str));
+#if ENABLE_SQUAT
+	squat_skip_output = 0;
+#endif
     }
 
     /* Steps:
@@ -3098,6 +3179,10 @@ static void handle_socket_lines(void)
     static int depth = 0;
     conString *line;
     int is_prompt;
+#if ENABLE_SQUAT
+    char *squat_raw = NULL;
+    size_t squat_rawlen = 0;
+#endif
 
     if (depth) return;	/* don't recurse */
     if (!(line = dequeue(&xsock->queue)))
@@ -3113,6 +3198,16 @@ static void handle_socket_lines(void)
 	    continue;
 	}
 
+#if ENABLE_SQUAT
+	squat_raw = NULL;
+	if (squat_active()) {
+	    squat_rawlen = line->len;
+	    if ((squat_raw = (char *)malloc(squat_rawlen + 1))) {
+		memcpy(squat_raw, line->data, squat_rawlen);
+		squat_raw[squat_rawlen] = '\0';
+	    }
+	}
+#endif
 	incoming_text = decode_ansi(line->data, xsock->attrs, emulation,
 	    &xsock->attrs);
 	incoming_text->time = line->time;
@@ -3120,6 +3215,14 @@ static void handle_socket_lines(void)
 	conStringfree(line);
 	incoming_text->links++;
 
+#if ENABLE_SQUAT
+	if (is_prompt && squat_raw && squat_rawlen > 0) {	/* games end chunks with GA: skip empty prompts */
+	    SquatSock ss;
+	    if (squat_sock_describe(xsock, &ss))
+		squat_line(&ss, SQUAT_KIND_GAME, SQUAT_LF_PROMPT, NULL,
+		    squat_raw, squat_rawlen);
+	}
+#endif
 	if (is_prompt) {
 	    if (do_hook(H_PROMPT, NULL, "%S", incoming_text)) {
 		Stringfree(incoming_text);
@@ -3128,7 +3231,12 @@ static void handle_socket_lines(void)
 	    }
 
 	} else {
-	    if (borg || hilite || gag) {
+	    if ((borg || hilite || gag)
+#if ENABLE_SQUAT
+		&& xsock->squat_auto != SQUAT_AUTO_CLIENT /* a remote client runs triggers */
+#endif
+		)
+	    {
 		/* Run the trigger matches against this incoming text line */
 		if (find_and_run_matches(NULL, -1, &incoming_text, xworld(),
 		    TRUE, 0))
@@ -3146,9 +3254,40 @@ static void handle_socket_lines(void)
 		incoming_text->attrs |= F_GAG;
 	    }
 
+#if ENABLE_SQUAT
+	    if (squat_raw) {
+		SquatSock ss;
+		if (squat_sock_describe(xsock, &ss)) {
+		    String *disp = NULL;
+		    if (squat_want_disp()) {
+			/* what TF will display after triggers (hilites, substitutions) */
+			disp = encode_ansi(CS(incoming_text), 0);
+			disp->links++;
+			if (disp->len == squat_rawlen &&
+			    memcmp(disp->data, squat_raw, squat_rawlen) == 0)
+			{
+			    Stringfree(disp);
+			    disp = NULL;
+			}
+		    }
+		    squat_line_disp(&ss, SQUAT_KIND_GAME,
+			(incoming_text->attrs & F_GAG) ? SQUAT_LF_GAG : 0,
+			NULL, squat_raw, squat_rawlen,
+			disp ? disp->data : NULL, disp ? disp->len : 0);
+		    if (disp) Stringfree(disp);
+		}
+	    }
+	    squat_skip_output = 1;	/* already sent as a game line */
+#endif
 	    world_output(xsock->world, CS(incoming_text));
+#if ENABLE_SQUAT
+	    squat_skip_output = 0;
+#endif
 	    Stringfree(incoming_text);
 	}
+#if ENABLE_SQUAT
+	if (squat_raw) { free(squat_raw); squat_raw = NULL; }
+#endif
     } while ((line = dequeue(&xsock->queue)));
     depth--;
 
@@ -3160,6 +3299,19 @@ static void handle_socket_lines(void)
 void world_output(World *world, conString *line)
 {
     Sock *saved_xsock = xsock;
+#if ENABLE_SQUAT
+    if (squat_skip_output) {
+	squat_skip_output = 0;
+    } else if (squat_active() && world && world->sock) {
+	SquatSock ss;
+	if (squat_sock_describe(world->sock, &ss)) {
+	    String *enc = encode_ansi(line, 0);
+	    enc->links++;
+	    squat_line(&ss, SQUAT_KIND_SYSTEM, 0, NULL, enc->data, enc->len);
+	    Stringfree(enc);
+	}
+    }
+#endif
     xsock = world ? world->sock : NULL;
     line->links++;
     recordline(world->history, line);
@@ -3251,6 +3403,16 @@ static void handle_implicit_prompt(void)
 
     xsock->prompt_timeout = tvzero;
     xsock->prepromptattrs = xsock->attrs; /* save attrs for unprompt() */
+#if ENABLE_SQUAT
+    /* an unterminated line that timed out becomes a prompt: report it raw */
+    if (squat_active() && xsock->buffer->len) {
+	SquatSock ss;
+	if (squat_sock_describe(xsock, &ss))
+	    squat_line(&ss, SQUAT_KIND_GAME, SQUAT_LF_PROMPT, NULL,
+		xsock->buffer->data, xsock->buffer->len);
+	xsock->squat_prompt_len = xsock->buffer->len;
+    }
+#endif
 
     new = decode_ansi(xsock->buffer->data, xsock->attrs, emulation,
 	&xsock->attrs);
@@ -3331,6 +3493,17 @@ static void telnet_subnegotiation(void)
 	}
         Sprintf(telbuf, "%c%c%c%c", TN_IAC, TN_SB, TN_TTYPE, '\0');
         ttype = ++xsock->ttype;
+#if ENABLE_SQUAT
+	{
+	    /* opt-in: TINYFUGUE, a terminal type, then "MTTS <capabilities>" */
+	    char mtts[48];
+	    if (squat_mtts_reply(&xsock->ttype, mtts, sizeof mtts)) {
+		Sappendf(telbuf, "%s%c%c", mtts, TN_IAC, TN_SE);
+		telnet_send(telbuf);
+		break;
+	    }
+	}
+#endif
         if (!enum_ttype[ttype].data) { ttype--; xsock->ttype = -1; }
         SStringcat(telbuf, &enum_ttype[ttype]);
         Sappendf(telbuf, "%c%c", TN_IAC, TN_SE);
@@ -3394,6 +3567,9 @@ static void telnet_subnegotiation(void)
 #endif
 #if ENABLE_GMCP
     case TN_GMCP:
+#if ENABLE_SQUAT
+	    squat_sock_gmcp_event(xsock, xsock->subbuffer->data + 3);
+#endif
 	    do_hook(H_GMCP, NULL, "%s", xsock->subbuffer->data + 3);
 	    break;
 #endif
@@ -3401,6 +3577,11 @@ static void telnet_subnegotiation(void)
     case TN_MSDP:
 	{
 	    STATIC_BUFFER(msdp_out);
+#if ENABLE_SQUAT
+	    /* the remote client gets the raw payload; the bridge decodes it */
+	    squat_sock_msdp_event(xsock, xsock->subbuffer->data + 3,
+		xsock->subbuffer->len - 3);
+#endif
 	    /* payload starts right after IAC SB MSDP (data+3) and runs to
 	     * the end of the (already IAC-SE-trimmed) subbuffer */
 	    msdp_decode(xsock->subbuffer->data + 3,
@@ -4143,6 +4324,9 @@ static void do_naws(Sock *sock)
     width = (emulation != EMUL_RAW && wrapflag && wrapsize) ?
 	wrapsize : columns;
     height = winlines() + !visual;
+#if ENABLE_SQUAT
+    squat_naws_override(sock, &width, &height);
+#endif
 
     Sprintf(telbuf, "%c%c%c", TN_IAC, TN_SB, TN_NAWS);
     octet[0] = (width >> 8);
@@ -4365,3 +4549,380 @@ int nactive(const char *worldname)
         return 0;
     return w->screen->active ? w->screen->nnew : 0;
 }
+
+#if ENABLE_SQUAT
+/*****************************************************************************
+ * squat glue
+ *
+ * Everything in this section needs access to struct Sock, which is private to
+ * this file.  squat.c (the remote-control bridge) sees sockets only through
+ * the SquatSock snapshots and the small API declared in squat.h.
+ *****************************************************************************/
+
+static unsigned long squat_next_serial = 0;
+
+static long long squat_tv_ms(const struct timeval *tv)
+{
+    return (long long)tv->tv_sec * 1000 + tv->tv_usec / 1000;
+}
+
+int squat_sock_describe(Sock *s, SquatSock *o)
+{
+    if (!s || !s->world) return 0;
+    if (!s->squat_serial) s->squat_serial = ++squat_next_serial;
+    memset(o, 0, sizeof *o);
+    o->serial = s->squat_serial;
+    o->world = s->world->name;
+    o->host = s->host ? s->host : (s->world->host ? s->world->host : "");
+    o->port = s->port ? s->port : (s->world->port ? s->world->port : "");
+    switch (s->constate) {
+    case SS_CONNECTED:
+    case SS_OPEN:
+	o->state = SQUAT_ST_CONNECTED;
+	break;
+    case SS_ZOMBIE:
+    case SS_DEAD:
+	o->state = SQUAT_ST_ENDED;
+	break;
+    default:			/* NEW, RESOLVING, RESOLVED, CONNECTING */
+	o->state = SQUAT_ST_CONNECTING;
+	break;
+    }
+#if HAVE_SSL
+    o->tls = (s->ssl != NULL);
+#endif
+    o->remote_echo = (s->constate == SS_CONNECTED) && TELOPT(s, them, TN_ECHO);
+    o->fg = (s == fsock);
+    o->input = s->squat_input;
+    o->automation = s->squat_auto;
+    o->started_ms = squat_tv_ms(&s->squat_start);
+    return 1;
+}
+
+void squat_sock_each(void (*cb)(const SquatSock *, void *), void *u)
+{
+    Sock *s, *next;
+    SquatSock ss;
+
+    for (s = hsock; s; s = next) {
+	next = s->next;
+	if (squat_sock_describe(s, &ss)) cb(&ss, u);
+    }
+}
+
+static Sock *squat_find(unsigned long serial)
+{
+    Sock *s;
+
+    if (!serial) return NULL;
+    for (s = hsock; s; s = s->next)
+	if (s->squat_serial == serial) return s;
+    return NULL;
+}
+
+int squat_sock_info(unsigned long serial, SquatSock *out)
+{
+    return squat_sock_describe(squat_find(serial), out);
+}
+
+/* Send text to a socket as raw game lines.  The text is never parsed by TF:
+ * it does not go through the command or macro interpreter.  Returns the
+ * number of lines sent, -1 if there is no such socket, -2 if not connected. */
+int squat_sock_send(unsigned long serial, const char *text, size_t len,
+    int silent)
+{
+    Sock *s = squat_find(serial), *saved;
+    const char *p = text, *end = text + len, *nl;
+    size_t l;
+    int n = 0;
+
+    if (!s) return -1;
+    if (s->constate != SS_CONNECTED) return -2;
+    saved = xsock;
+    xsock = s;
+    squat_in_remote_send = 1;
+    squat_silent = silent;
+    for (;;) {
+	nl = (const char *)memchr(p, '\n', end - p);
+	l = (nl ? nl : end) - p;
+	if (l && p[l - 1] == '\r') l--;
+	send_line(p, l, 1);
+	n++;
+	if (!nl) break;
+	p = nl + 1;
+	if (p == end) break;
+    }
+    squat_silent = 0;
+    squat_in_remote_send = 0;
+    xsock = saved;
+    return n;
+}
+
+int squat_sock_disc(unsigned long serial)
+{
+    Sock *s = squat_find(serial);
+
+    if (!s) return -1;
+    if (s->constate >= SS_ZOMBIE) return -2;
+    dc(s);
+    return 0;
+}
+
+/* Remove an ended connection (the remote client "dismissed" it). */
+int squat_sock_dismiss(unsigned long serial)
+{
+    Sock *s = squat_find(serial);
+
+    if (!s) return -1;
+    if (s->constate == SS_DEAD) return 0;
+    if (s->constate != SS_ZOMBIE) return -2;
+    if (s == fsock) return -3;	/* still on TF's screen; TF will drop it later */
+    s->constate = SS_DEAD;
+    dead_socks++;
+    return 0;
+}
+
+int squat_sock_set_control(unsigned long serial, int input, int automation)
+{
+    Sock *s = squat_find(serial);
+
+    if (!s) return -1;
+    if (input >= 0) s->squat_input = (unsigned char)input;
+    if (automation >= 0) s->squat_auto = (unsigned char)automation;
+    if (s->squat_cols && TELOPT(s, us, TN_NAWS)) do_naws(s);
+    return 0;
+}
+
+#if ENABLE_GMCP
+/* A GMCP message arrived from the game: "Package.Name {json}". */
+void squat_sock_gmcp_event(Sock *s, const char *text)
+{
+    SquatSock ss;
+
+    if (squat_active() && squat_sock_describe(s, &ss))
+	squat_gmcp(&ss, text);
+}
+
+/* Send a GMCP message to the game on behalf of a remote client.
+ * 0 ok, -1 no such socket, -2 GMCP not negotiated, -3 bad text. */
+int squat_sock_gmcp(unsigned long serial, const char *text)
+{
+    Sock *s = squat_find(serial), *saved;
+
+    if (!s) return -1;
+    if (s->constate != SS_CONNECTED || !TELOPT(s, them, TN_GMCP)) return -2;
+    if (!*text || strchr(text, (char)TN_IAC)) return -3;
+    saved = xsock;
+    xsock = s;
+    Sprintf(telbuf, "%c%c%c%s%c%c", TN_IAC, TN_SB, TN_GMCP, text, TN_IAC, TN_SE);
+    telnet_send(telbuf);
+    xsock = saved;
+    return 0;
+}
+#else
+void squat_sock_gmcp_event(Sock *s, const char *text) { (void)s; (void)text; }
+int squat_sock_gmcp(unsigned long serial, const char *text)
+{
+    (void)serial; (void)text;
+    return -2;
+}
+#endif /* ENABLE_GMCP */
+
+#if ENABLE_MSDP
+/* An MSDP message arrived from the game: the raw payload between IAC SB MSDP
+ * and IAC SE. */
+void squat_sock_msdp_event(Sock *s, const char *data, int len)
+{
+    SquatSock ss;
+
+    if (squat_active() && len > 0 && squat_sock_describe(s, &ss))
+	squat_msdp(&ss, data, (size_t)len);
+}
+
+/* Send a raw MSDP payload to the game for a remote client.
+ * 0 ok, -1 no such socket, -2 MSDP not negotiated, -3 bad payload. */
+int squat_sock_msdp(unsigned long serial, const char *data, size_t len)
+{
+    Sock *s = squat_find(serial), *saved;
+    char *frame;
+    int r;
+
+    if (!s) return -1;
+    if (s->constate != SS_CONNECTED || !TELOPT(s, them, TN_MSDP)) return -2;
+    if (len == 0 || len > 65536 || memchr(data, (unsigned char)TN_IAC, len)) return -3;
+    if (!(frame = (char *)malloc(len + 5))) return -3;
+    frame[0] = (char)TN_IAC;
+    frame[1] = (char)TN_SB;
+    frame[2] = (char)TN_MSDP;
+    memcpy(frame + 3, data, len);
+    frame[3 + len] = (char)TN_IAC;
+    frame[4 + len] = (char)TN_SE;
+    saved = xsock;
+    xsock = s;
+    r = transmit(frame, (unsigned int)(len + 5)) ? 0 : -3;
+    telnet_debug("sent", frame, (int)(len + 5));
+    xsock = saved;
+    free(frame);
+    return r;
+}
+#else
+void squat_sock_msdp_event(Sock *s, const char *data, int len)
+{
+    (void)s; (void)data; (void)len;
+}
+int squat_sock_msdp(unsigned long serial, const char *data, size_t len)
+{
+    (void)serial; (void)data; (void)len;
+    return -2;
+}
+#endif /* ENABLE_MSDP */
+
+/* Give every socket back to TinyFugue (the bridge went away). */
+void squat_sock_reset_control(void)
+{
+    Sock *s;
+
+    for (s = hsock; s; s = s->next) {
+	int had_size = s->squat_cols != 0;
+	s->squat_input = SQUAT_INPUT_TF;
+	s->squat_auto = SQUAT_AUTO_TF;
+	s->squat_cols = s->squat_rows = 0;
+	if (had_size && s->constate == SS_CONNECTED && TELOPT(s, us, TN_NAWS))
+	    do_naws(s);
+    }
+}
+
+int squat_sock_resend_naws(unsigned long serial)
+{
+    Sock *s = squat_find(serial);
+
+    if (!s) return -1;
+    if (TELOPT(s, us, TN_NAWS)) do_naws(s);
+    return 0;
+}
+
+void squat_set_size(unsigned long serial, unsigned int cols, unsigned int rows)
+{
+    Sock *s = squat_find(serial);
+
+    if (!s) return;
+    s->squat_cols = cols;
+    s->squat_rows = rows;
+    if (s->squat_input != SQUAT_INPUT_TF && TELOPT(s, us, TN_NAWS))
+	do_naws(s);
+}
+
+/* The size sent to the game follows whoever controls the socket. */
+int squat_naws_override(const Sock *sock, unsigned int *cols, unsigned int *rows)
+{
+    if (sock->squat_cols && sock->squat_rows &&
+	sock->squat_input != SQUAT_INPUT_TF)
+    {
+	*cols = sock->squat_cols;
+	*rows = sock->squat_rows;
+	return 1;
+    }
+    return 0;
+}
+
+/* Called from send_line().  Nonzero means: refuse this send.  A socket under
+ * remote control refuses keyboard-originated text (triggers and remote sends
+ * are not affected). */
+int squat_sock_gate(void)
+{
+    if (xsock && squat_kbd_depth > 0 && !squat_in_remote_send &&
+	xsock->squat_input == SQUAT_INPUT_REMOTE)
+    {
+	eprintf("world %s is controlled by a remote client "
+	    "(use \"/control %s tf\" to take it back)",
+	    xsock->world->name, xsock->world->name);
+	return 1;
+    }
+    return 0;
+}
+
+struct squat_replay_ctx { SquatSock ss; };
+
+static void squat_replay_cb(const conString *line, void *u)
+{
+    struct squat_replay_ctx *ctx = (struct squat_replay_ctx *)u;
+    String *enc = encode_ansi(line, 0);
+
+    enc->links++;
+    squat_line(&ctx->ss, SQUAT_KIND_GAME, SQUAT_LF_REPLAY, NULL,
+	enc->data, enc->len);
+    Stringfree(enc);
+}
+
+/* Send the world's recent history to the bridge, flagged as replay. */
+void squat_sock_replay(unsigned long serial)
+{
+    Sock *s = squat_find(serial);
+    struct squat_replay_ctx ctx;
+
+    if (!s || !s->world || !s->world->history) return;
+    if (!squat_sock_describe(s, &ctx.ss)) return;
+    history_foreach(s->world->history, squat_replay_cb, &ctx, 500);
+}
+
+/* Partial lines (no newline yet) are how MUDs send prompts such as "Login:".
+ * TF shows them only if /lp is on, but a remote client needs them always, so
+ * after 150ms of silence a partial line is reported once as a prompt. */
+#define SQUAT_PROMPT_MS 150
+
+static long squat_idle_ms(const Sock *s)
+{
+    struct timeval now;
+    gettime(&now);
+    return (long)(now.tv_sec - s->time[SOCK_RECV].tv_sec) * 1000 +
+	(now.tv_usec - s->time[SOCK_RECV].tv_usec) / 1000;
+}
+
+int squat_prompt_pending(void)
+{
+    Sock *s;
+
+    for (s = hsock; s; s = s->next)
+	if (s->constate == SS_CONNECTED && s->buffer->len &&
+	    !s->queue.list.head && s->buffer->len != s->squat_prompt_len)
+	    return 1;
+    return 0;
+}
+
+void squat_sock_scan_prompts(void)
+{
+    Sock *s;
+    SquatSock ss;
+
+    for (s = hsock; s; s = s->next) {
+	if (s->constate != SS_CONNECTED) continue;
+	if (!s->buffer->len) { s->squat_prompt_len = 0; continue; }
+	if (s->queue.list.head || s->buffer->len == s->squat_prompt_len) continue;
+	if (squat_idle_ms(s) < SQUAT_PROMPT_MS) continue;
+	s->squat_prompt_len = s->buffer->len;
+	if (squat_sock_describe(s, &ss))
+	    squat_line(&ss, SQUAT_KIND_GAME, SQUAT_LF_PROMPT, NULL,
+		s->buffer->data, s->buffer->len);
+    }
+}
+
+/* Open a connection for a remote client.  If world is non-empty it names a TF
+ * world record (autologin applies); otherwise host:port makes a temporary
+ * world. */
+int squat_sock_connect(const char *world, const char *host, const char *port,
+    int ssl, unsigned long *serial, char *err, size_t errlen)
+{
+    Sock *saved = xsock;
+    int flags = CONN_BG | CONN_AUTOLOGIN | (ssl ? CONN_SSL : 0), r;
+    SquatSock ss;
+
+    if (world && *world) r = openworld(world, NULL, flags);
+    else r = openworld(host, port, flags);
+    /* on success opensock() left the new socket in xsock */
+    if (serial) *serial = (r && xsock && squat_sock_describe(xsock, &ss)) ? ss.serial : 0;
+    xsock = saved;
+    if (!r && err && errlen)
+	snprintf(err, errlen, "TinyFugue could not open the connection");
+    return r;
+}
+#endif /* ENABLE_SQUAT */

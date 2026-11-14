@@ -17,6 +17,10 @@
 # define handle_quote_command        NULL
 # define handle_repeat_command       NULL
 #endif
+#if !ENABLE_SQUAT
+# define handle_control_command      NULL
+# define handle_squat_command        NULL
+#endif
 #if NO_HISTORY
 # define handle_histsize_command     NULL
 # define handle_log_command          NULL
@@ -35,6 +39,7 @@ defcmd("BIND"        , handle_bind_command        , 0)
 defcmd("CALLLUA"     , handle_calllua_command    , 0)
 #endif
 defcmd("CONNECT"     , handle_connect_command     , 0)
+defcmd("CONTROL"     , handle_control_command     , 0)
 defcmd("CORE"        , handle_core_command        , 0)
 defcmd("DC"          , handle_dc_command          , 0)
 defcmd("DEF"         , handle_def_command         , 0)
@@ -83,6 +88,7 @@ defcmd("REBOOT"      , handle_reboot_command      , 0)
 defcmd("RECALL"      , handle_recall_command      , 0)
 defcmd("RECORDLINE"  , handle_recordline_command  , 0)
 defcmd("RELIMIT"     , handle_relimit_command     , 0)
+defcmd("RENAMEWORLD" , handle_renameworld_command , 0)
 defcmd("REPEAT"      , handle_repeat_command      , 0)
 defcmd("RESTRICT"    , handle_restrict_command    , 0)
 defcmd("SAVE"        , handle_save_command        , 0)
@@ -91,6 +97,7 @@ defcmd("SET"         , handle_set_command         , 0)
 defcmd("SETENV"      , handle_setenv_command      , 0)
 defcmd("SH"          , handle_sh_command          , 0)
 defcmd("SHIFT"       , handle_shift_command       , 0)
+defcmd("SQUAT"       , handle_squat_command       , 0)
 defcmd("STATUS_ADD"  , handle_status_add_command  , 0)
 defcmd("STATUS_CLEAR", handle_status_clear_command, 0)
 defcmd("STATUS_EDIT" , handle_status_edit_command , 0)

@@ -413,6 +413,8 @@ int handle_echo_func(
 struct Value *handle_restrict_command(String *args, int offset)
 {
     int level;
+
+    if (squat_sandbox > 0) { eprintf("restricted"); return shareval(val_zero); }
     static conString enum_restrict[] = {
         STRING_LITERAL("none"), STRING_LITERAL("shell"),
         STRING_LITERAL("file"), STRING_LITERAL("world"),

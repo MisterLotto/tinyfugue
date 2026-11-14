@@ -259,6 +259,7 @@ lua_State *lua_state = NULL;
 
 struct Value *handle_calllua_command(String *args, int offset)
 {
+	if (squat_sandbox > 0) { eprintf("restricted"); return shareval(val_zero); }
 	// for the love of <enter_your_gods_name_here>,
 	// REMEMBER TO FREE cstr_args before returning!
 	char *cstr_args = strdup(args->data + offset);
@@ -332,6 +333,7 @@ struct Value *handle_calllua_command(String *args, int offset)
 
 struct Value *handle_loadlua_command(String *args, int offset)
 {
+	if (squat_sandbox > 0) { eprintf("restricted"); return shareval(val_zero); }
 	// check if lua has been initialised
 	if(lua_state == NULL)
 	{ // it hasn't: initialise now
@@ -361,6 +363,7 @@ struct Value *handle_loadlua_command(String *args, int offset)
 
 struct Value *handle_purgelua_command(String *args, int offset)
 {
+	if (squat_sandbox > 0) { eprintf("restricted"); return shareval(val_zero); }
 	if(lua_state != NULL)
     {
     	lua_close(lua_state);

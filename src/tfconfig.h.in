@@ -101,6 +101,8 @@
 #define ENABLE_GMCP 0
 #define ENABLE_MSDP 0
 #define ENABLE_OPTION102 0
+/* Remote control bridge ("squat"); see docs/TF-SQUATTER.md. Set to 0 to compile it out. */
+#define ENABLE_SQUAT 1
 
 #define HAVE_MCCP (HAVE_ZLIB_H && HAVE_LIBZ)
 

@@ -188,6 +188,8 @@ VEC_TYPEDEF(hookvec_t, NUM_HOOKS);
 /* externs */
 extern const char version[], sysname[], copyright[], contrib[], mods[];
 extern int restriction, debug;
+extern int squat_sandbox;	/* >0 while an uploaded script runs: shell, files, new connections and Lua are off */
+#define SANDBOX_LEVEL RESTRICT_WORLD
 extern void internal_error(const char *file, int line,
     const char *fmt, ...) format_printf(3, 4);
 extern void internal_error2(const char *file, int line, const char *file2,
