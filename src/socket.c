@@ -996,6 +996,14 @@ void main_loop(void)
                 count--;
                 squat_writable();
             }
+            if (squat_cand_fd >= 0 && FD_ISSET(squat_cand_fd, &active)) {
+                count--;
+                squat_cand_readable();
+            }
+            if (squat_rv_fd >= 0 && FD_ISSET(squat_rv_fd, &active)) {
+                count--;
+                squat_rv_readable();
+            }
 #endif
 
             /* Check for socket completion/activity.  We pick up where we

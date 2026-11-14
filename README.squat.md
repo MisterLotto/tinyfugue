@@ -49,7 +49,7 @@ Settings are ordinary variables read when `/squat on` runs (and some when used):
 | `squat_bin` | `tf-squatterd` | helper program |
 | `squat_port` | `10328` | listen port |
 | `squat_bind` | `127.0.0.1` | listen address (loopback unless you change it) |
-| `squat_dir` | `~/.tf-squatter` | keys, certificate, paired devices, log |
+| `squat_dir` | `~/.squatterd/tf` | keys, certificate, paired devices, log (an existing `~/.tf-squatter` is kept and used when `~/.squatterd/tf` does not exist yet) |
 | `squat_plain` | `0` | non-zero: plain `ws://` (loopback only; e.g. behind an ssh tunnel) |
 | `squat_log` | `info` | `debug` logs every message between TF and the helper |
 | `squat_takeover` | `auto` | `auto` lets a paired operator take over, `ask` asks you first, `off` refuses |
@@ -127,10 +127,29 @@ An admin device can send a macro file (`tf.script.put`): the bridge stores it in
 * Only files directly inside the scripts directory are ever loaded, whatever a client sends.
 * Removing a script removes the file; the macros it defined remain until `/undef`.
 
+## Restarting the bridge
+
+The game connections are TinyFugue's, so the bridge can be restarted or upgraded without losing any of them:
+
+```sh
+tf-squatterd reload     # new binary, same connections; clients reconnect and replay on their own
+tf-squatterd update     # downloads a release, replaces the binary and reloads the running bridge
+```
+
+While `/squat on` is active TinyFugue keeps a *rendezvous*: a unix socket `<squat_dir>/tf.sock` and a random
+token in `<squat_dir>/ctl.token` (both mode 0600, removed by `/squat off`). A new bridge connects, sends
+`KNOCK <token> <pid>`, is held (nothing changes for the running bridge) and, once it is fully started, sends
+`ATTACH`: TinyFugue flushes and closes the old channel and continues on the new one. If the new bridge fails
+first, the old one never noticed. If the channel dies (bridge crashed or killed) TinyFugue prints
+`no bridge attached; waiting for one`, keeps every connection, and a new bridge (`/squat on`, `tf-squatterd reload`
+or `tf-squatterd serve --knock`) attaches and gets all sessions announced again with history. `RESYNC` from the
+bridge does the same re-announcement. Details: `docs/TF-SQUATTER.md` section 13b in squatClientDaemon.
+
 ## Tests
 
 ```sh
 TF_BIN=src/tf TF_LIB=lib/tf python3 tests/squat/test_squat.py     # TF against a fake bridge
+TF_BIN=src/tf TF_LIB=lib/tf python3 tests/squat/test_rendezvous.py # knock, attach, detach, resync
 cd ../squat/squatClientDaemon
 make test-tf  TF_BIN=... TF_LIB=...                               # TF against the real bridge
 make harness  TF_BIN=... TF_LIB=...                               # everything, against real games

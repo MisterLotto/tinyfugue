@@ -17,6 +17,11 @@ and a mock MUD. It needs no Go toolchain and checks the basics of `src/squat.c`:
 TF_BIN=/path/to/src/tf TF_LIB=/path/to/lib/tf python3 tests/squat/test_squat.py
 ```
 
+`test_rendezvous.py` covers the rendezvous (a restarted bridge knocks: token check, held candidate, attach swaps the
+channel and closes the old one, a dead channel detaches without touching game connections, resync, cleanup on
+`/squat off`). The real bridge restarting under a real TinyFugue is `TestRealTinyFugueReload` in squatClientDaemon
+(`internal/tfbridge`, needs TF_BIN/TF_LIB).
+
 Everything else (remote world editing, GMCP, takeover requests, `tf.exec`, the
 status indicator, `disp`, TLS, pairing, roles) is covered with the real bridge
 and real games by the Go harness in the squatClientDaemon repository:

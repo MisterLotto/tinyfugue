@@ -50,6 +50,9 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <sys/un.h>
+#include <poll.h>
+#include <time.h>
 
 #define SQUAT_OUT_MAX   (4u * 1024 * 1024)	/* queued bytes before we drop the bridge */
 #define SQUAT_LINE_MAX  (256u * 1024)		/* longest accepted TFCTL line */
@@ -61,8 +64,16 @@ int squat_in_remote_send = 0;
 int squat_silent = 0;
 int squat_skip_output = 0;
 int squat_fd = -1;
+int squat_rv_fd = -1;		/* rendezvous listener (unix socket), or -1 */
+int squat_cand_fd = -1;		/* a bridge that knocked, not yet attached */
+#define rv_fd squat_rv_fd
+#define cand_fd squat_cand_fd
+#define squat_on() (squat_fd >= 0 || squat_rv_fd >= 0)
+static void rv_close(void);
+static void rv_tick(void);
 
-static pid_t bridge_pid = -1;
+static pid_t bridge_pid = -1;		/* the attached bridge (maybe not our child) */
+static pid_t child_pid = -1;		/* the bridge we forked, until reaped */
 static pid_t reap_pid = -1;		/* killed child still to be reaped */
 static int bridge_ready = 0;		/* bridge sent HELLO */
 static char instance[17];
@@ -227,6 +238,7 @@ static size_t outoff;
 static Buf inq;
 
 static void squat_stop(const char *why);
+static void squat_detach(const char *why);
 
 static void out_flush(void)
 {
@@ -235,7 +247,7 @@ static void out_flush(void)
 	if (n > 0) { outoff += (size_t)n; continue; }
 	if (n < 0 && errno == EINTR) continue;
 	if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
-	squat_stop("control channel write failed");
+	squat_detach("control channel write failed");
 	return;
     }
     if (squat_fd < 0) return;
@@ -252,7 +264,7 @@ static void send_msg(Buf *b)
 {
     if (squat_fd < 0) return;
     if (outq.len - outoff + b->len + 1 > SQUAT_OUT_MAX) {
-	squat_stop("bridge too slow, remote access stopped");
+	squat_detach("bridge too slow, bridge detached");
 	return;
     }
     if (outoff > 0 && outoff == outq.len) outq.len = outoff = 0;
@@ -692,11 +704,17 @@ static void reap_children(void)
 {
     int st;
     if (reap_pid > 0 && waitpid(reap_pid, &st, WNOHANG) != 0) reap_pid = -1;
-    if (bridge_pid > 0) {
-	pid_t r = waitpid(bridge_pid, &st, WNOHANG);
-	if (r == bridge_pid || (r < 0 && errno == ECHILD)) {
-	    bridge_pid = -1;
-	    if (squat_fd >= 0) squat_stop("bridge exited");
+    if (child_pid > 0) {
+	pid_t r = waitpid(child_pid, &st, WNOHANG);
+	if (r == child_pid || (r < 0 && errno == ECHILD)) {
+	    pid_t gone = child_pid;
+	    child_pid = -1;
+	    /* it may have handed over to a newer bridge (reload): only if the
+	     * channel is still its own is this a loss; the rendezvous stays open */
+	    if (bridge_pid == gone) {
+		bridge_pid = -1;
+		if (squat_fd >= 0) squat_detach("bridge exited");
+	    }
 	}
     }
 }
@@ -707,7 +725,8 @@ void squat_tick(void)
 {
     size_t i;
 
-    if (reap_pid > 0 || bridge_pid > 0) reap_children();
+    if (reap_pid > 0 || child_pid > 0) reap_children();
+    rv_tick();
     if (squat_fd < 0 || !bridge_ready) return;
     ask_expire();
     if (squat_fd < 0) return;
@@ -1164,6 +1183,15 @@ static void handle_message(char *line)
 	bridge_ready = 1;
 	return;
     }
+    if (!strcmp(f[0], "RESYNC")) {
+	/* The bridge lost its view of our sessions (it restarted without the state of
+	 * its predecessor): forget what it was told, the next tick announces every
+	 * connection again, with history. */
+	free(known);
+	known = NULL;
+	nknown = capknown = 0;
+	return;
+    }
     if (!strcmp(f[0], "SEND")) {
 	/* SEND reqid sid device noecho text */
 	int n;
@@ -1306,24 +1334,12 @@ static void handle_message(char *line)
     /* unknown messages are ignored for forward compatibility */
 }
 
-void squat_readable(void)
+/* Handle every complete message in inq. */
+static void inq_process(void)
 {
-    char tmp[16384];
-    ssize_t n;
     char *nl;
-    size_t start;
+    size_t start = 0;
 
-    if (squat_fd < 0) return;
-    n = read(squat_fd, tmp, sizeof tmp);
-    if (n < 0) {
-	if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) return;
-	squat_stop("control channel read failed");
-	return;
-    }
-    if (n == 0) { squat_stop("bridge exited"); return; }
-    buf_put(&inq, tmp, (size_t)n);
-
-    start = 0;
     while (squat_fd >= 0 && (nl = (char *)memchr(inq.p + start, '\n', inq.len - start))) {
 	*nl = '\0';
 	handle_message(inq.p + start);
@@ -1335,7 +1351,24 @@ void squat_readable(void)
 	inq.len -= start;
 	inq.p[inq.len] = '\0';
     }
-    if (inq.len > SQUAT_LINE_MAX) squat_stop("bridge sent an oversized message");
+    if (inq.len > SQUAT_LINE_MAX) squat_detach("bridge sent an oversized message");
+}
+
+void squat_readable(void)
+{
+    char tmp[16384];
+    ssize_t n;
+
+    if (squat_fd < 0) return;
+    n = read(squat_fd, tmp, sizeof tmp);
+    if (n < 0) {
+	if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) return;
+	squat_detach("control channel read failed");
+	return;
+    }
+    if (n == 0) { squat_detach("bridge exited"); return; }
+    buf_put(&inq, tmp, (size_t)n);
+    inq_process();
 }
 
 void squat_writable(void)
@@ -1344,30 +1377,295 @@ void squat_writable(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* rendezvous: a restarted bridge knocks and takes over the channel    */
+/* ------------------------------------------------------------------ */
+
+/* While squat is on TinyFugue listens on a unix socket in the squat data dir
+ * (mode 0600) and keeps a random token in <dir>/ctl.token (mode 0600; line 1 the
+ * token, line 2 the socket path).  A bridge that was not forked by us (a reload
+ * starts the new binary itself) or whose channel died connects and sends
+ *     KNOCK <token> <pid>
+ * We compare the token in constant time and answer with HELLO (instance, features).
+ * The candidate stays HELD: nothing changes for the bridge that is attached.  When
+ * the candidate sends ATTACH (it is fully started), we flush what is queued for the
+ * old bridge, close that channel (its EOF tells the old bridge that nothing more
+ * will come) and continue on the candidate.  If it never attaches, the old bridge
+ * was never disturbed: that is the rollback.  Game connections are TinyFugue's and
+ * are never touched. */
+
+static char rv_sock[256], rv_tokfile[1100], rv_token[65];
+static Buf candq;
+static int cand_auth;
+static time_t cand_since;
+static long cand_pid;
+
+static int token_eq(const char *a, const char *b)
+{
+    size_t la = strlen(a), lb = strlen(b), i;
+    unsigned char d = (unsigned char)(la != lb);
+    for (i = 0; i < lb; i++) d |= (unsigned char)((i < la ? a[i] : 0) ^ b[i]);
+    return d == 0;
+}
+
+static void cand_close(void)
+{
+    if (cand_fd >= 0) {
+	readers_clear(cand_fd);
+	close(cand_fd);
+	cand_fd = -1;
+    }
+    cand_auth = 0;
+    buf_free(&candq);
+}
+
+static void rv_close(void)
+{
+    cand_close();
+    if (rv_fd >= 0) {
+	readers_clear(rv_fd);
+	close(rv_fd);
+	rv_fd = -1;
+	if (rv_sock[0]) unlink(rv_sock);
+	if (rv_tokfile[0]) unlink(rv_tokfile);
+    }
+    memset(rv_token, 0, sizeof rv_token);
+    rv_sock[0] = rv_tokfile[0] = '\0';
+}
+
+/* Where the socket lives: inside the data dir when the path fits a sockaddr_un,
+ * else in a private per-user directory under /tmp. */
+static int rv_choose_path(const char *dir)
+{
+    struct sockaddr_un sa;
+    if (strlen(dir) + 8 < sizeof sa.sun_path) {
+	snprintf(rv_sock, sizeof rv_sock, "%s/tf.sock", dir);
+	return 1;
+    } else {
+	unsigned long h = 5381;
+	const char *c;
+	char d[64];
+	for (c = dir; *c; c++) h = h * 33 + (unsigned char)*c;
+	snprintf(d, sizeof d, "/tmp/tf-squat-%lu", (unsigned long)getuid());
+	if (mkdir(d, 0700) < 0 && errno != EEXIST) return 0;
+	chmod(d, 0700);
+	snprintf(rv_sock, sizeof rv_sock, "%s/%08lx.sock", d, h & 0xffffffffUL);
+	return strlen(rv_sock) < sizeof sa.sun_path;
+    }
+}
+
+static int rv_open(const char *dir)
+{
+    unsigned char rnd[32];
+    struct sockaddr_un sa;
+    char tmp[1200];
+    int fd, rfd, i, tf;
+    mode_t old;
+    FILE *fp;
+
+    rv_close();
+    if ((rfd = open("/dev/urandom", O_RDONLY)) < 0) return 0;
+    if (read(rfd, rnd, sizeof rnd) != (ssize_t)sizeof rnd) { close(rfd); return 0; }
+    close(rfd);
+    for (i = 0; i < 32; i++) {
+	rv_token[2 * i] = "0123456789abcdef"[rnd[i] >> 4];
+	rv_token[2 * i + 1] = "0123456789abcdef"[rnd[i] & 15];
+    }
+    rv_token[64] = '\0';
+    if (!rv_choose_path(dir)) return 0;
+    snprintf(rv_tokfile, sizeof rv_tokfile, "%s/ctl.token", dir);
+    unlink(rv_sock);
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return 0;
+    memset(&sa, 0, sizeof sa);
+    sa.sun_family = AF_UNIX;
+    snprintf(sa.sun_path, sizeof sa.sun_path, "%s", rv_sock);
+    old = umask(077);
+    i = bind(fd, (struct sockaddr *)&sa, sizeof sa);
+    umask(old);
+    if (i < 0 || listen(fd, 4) < 0) { close(fd); rv_sock[0] = '\0'; return 0; }
+    chmod(rv_sock, 0600);
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    snprintf(tmp, sizeof tmp, "%s.tmp", rv_tokfile);
+    unlink(tmp);
+    tf = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (tf < 0 || !(fp = fdopen(tf, "w"))) { if (tf >= 0) close(tf); close(fd); unlink(rv_sock); rv_sock[0] = '\0'; return 0; }
+    fprintf(fp, "%s\n%s\n", rv_token, rv_sock);
+    if (fclose(fp) != 0 || rename(tmp, rv_tokfile) < 0) { unlink(tmp); close(fd); unlink(rv_sock); rv_sock[0] = '\0'; return 0; }
+    rv_fd = fd;
+    readers_set(rv_fd);
+    return 1;
+}
+
+static void cand_send(const Buf *b)
+{
+    size_t off = 0;
+    while (cand_fd >= 0 && off < b->len + 1) {
+	char nl = '\n';
+	const char *p = off < b->len ? b->p + off : &nl;
+	size_t n = off < b->len ? b->len - off : 1;
+	ssize_t w = write(cand_fd, p, n);
+	if (w > 0) { off += (size_t)w; continue; }
+	if (w < 0 && errno == EINTR) continue;
+	cand_close();	/* a fresh socket that cannot take a line: give up */
+	return;
+    }
+}
+
+static void rv_tick(void)
+{
+    if (cand_fd >= 0) {
+	time_t now = time(NULL);
+	if (now - cand_since > (cand_auth ? 60 : 5)) cand_close();
+    }
+}
+
+void squat_rv_readable(void)
+{
+    int c;
+    if (rv_fd < 0) return;
+    c = accept(rv_fd, NULL, NULL);
+    if (c < 0) return;
+    rv_tick();			/* an expired candidate must not block a new knock */
+    if (cand_fd >= 0) { close(c); return; }	/* one knock at a time */
+    fcntl(c, F_SETFL, fcntl(c, F_GETFL, 0) | O_NONBLOCK);
+    fcntl(c, F_SETFD, FD_CLOEXEC);
+    cand_fd = c;
+    cand_auth = 0;
+    cand_since = time(NULL);
+    buf_free(&candq);
+    readers_set(cand_fd);
+}
+
+static void cand_commit(size_t consumed)
+{
+    int nfd = cand_fd, i;
+    Buf tail = { 0 };
+
+    buf_put(&tail, candq.p + consumed, candq.len - consumed);
+    if (squat_fd >= 0) {
+	/* what is queued for the old bridge goes first; the EOF that follows tells
+	 * it that nothing more will come */
+	for (i = 0; i < 40 && squat_fd >= 0 && outoff < outq.len; i++) {
+	    struct pollfd pf;
+	    out_flush();
+	    if (squat_fd < 0 || outoff >= outq.len) break;
+	    pf.fd = squat_fd; pf.events = POLLOUT; pf.revents = 0;
+	    poll(&pf, 1, 50);
+	}
+	if (squat_fd >= 0) {
+	    readers_clear(squat_fd);
+	    writers_clear(squat_fd);
+	    close(squat_fd);
+	    squat_fd = -1;
+	}
+    }
+    outq.len = outoff = 0;
+    buf_free(&inq);
+    squat_fd = nfd;
+    cand_fd = -1;
+    cand_auth = 0;
+    buf_free(&candq);
+    buf_put(&inq, tail.p ? tail.p : "", tail.len);
+    buf_free(&tail);
+    readers_clear(squat_fd);
+    readers_set(squat_fd);
+    bridge_pid = cand_pid > 0 ? (pid_t)cand_pid : -1;
+    bridge_ready = 1;
+    oprintf("%% squat: a bridge (pid %ld) attached", cand_pid);
+    if (!status_field_added) {
+	run_status_command("/status_add squat_status:14");
+	status_field_added = 1;
+    }
+    inq_process();
+}
+
+static void cand_process(void)
+{
+    char *nl;
+    size_t start = 0;
+
+    while (cand_fd >= 0 && (nl = (char *)memchr(candq.p + start, '\n', candq.len - start))) {
+	char *f[MAXF];
+	int nf, i;
+	*nl = '\0';
+	nf = split_fields(candq.p + start, f);
+	for (i = 0; i < nf; i++) unescape(f[i]);
+	start = (size_t)(nl - candq.p) + 1;
+	if (!cand_auth) {
+	    if (nf >= 3 && !strcmp(f[0], "KNOCK") && rv_token[0] && token_eq(f[1], rv_token)) {
+		Buf b = { 0 };
+		char pidbuf[24];
+		cand_auth = 1;
+		cand_pid = atol(f[2]);
+		cand_since = time(NULL);
+		snprintf(pidbuf, sizeof pidbuf, "%ld", (long)getpid());
+		buf_str(&b, "HELLO");
+		buf_field(&b, "1");
+		buf_field(&b, "tf");
+		buf_field(&b, instance);
+		buf_field(&b, pidbuf);
+		buf_field(&b, hello_features());
+		cand_send(&b);
+		buf_free(&b);
+	    } else {
+		oputs("% squat: rejected a knock (bad token)");
+		cand_close();
+		return;
+	    }
+	} else if (!strcmp(f[0], "ATTACH")) {
+	    cand_commit(start);
+	    return;
+	} else if (!strcmp(f[0], "BYE")) {
+	    cand_close();
+	    return;
+	}
+    }
+    if (cand_fd < 0) return;
+    if (start) {
+	memmove(candq.p, candq.p + start, candq.len - start);
+	candq.len -= start;
+    }
+    if (candq.len > 4096) cand_close();
+}
+
+void squat_cand_readable(void)
+{
+    char tmp[2048];
+    ssize_t n;
+
+    if (cand_fd < 0) return;
+    n = read(cand_fd, tmp, sizeof tmp);
+    if (n < 0) {
+	if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) return;
+	cand_close();
+	return;
+    }
+    if (n == 0) { cand_close(); return; }
+    buf_put(&candq, tmp, (size_t)n);
+    cand_process();
+}
+
+/* ------------------------------------------------------------------ */
 /* starting and stopping the bridge                                    */
 /* ------------------------------------------------------------------ */
 
-static void squat_stop(const char *why)
+/* The channel to the bridge is gone (it exited, crashed, was too slow, or was
+ * replaced).  Game connections are TinyFugue's own and are not touched; the
+ * rendezvous stays open so a new bridge can knock and take over. */
+static void squat_detach(const char *why)
 {
     if (squat_fd >= 0) {
 	/* nobody is left to type or to run triggers: TinyFugue takes over again */
 	squat_sock_reset_control();
 	memset(asks, 0, sizeof asks);
 	set_status_var("");
-	if (status_field_added && !in_atexit_stop) {
-	    run_status_command("/status_rm squat_status");
-	    status_field_added = 0;
-	}
 	readers_clear(squat_fd);
 	writers_clear(squat_fd);
 	close(squat_fd);
 	squat_fd = -1;
     }
-    if (bridge_pid > 0) {
-	kill(bridge_pid, SIGTERM);
-	if (waitpid(bridge_pid, NULL, WNOHANG) == 0) reap_pid = bridge_pid;
-	bridge_pid = -1;
-    }
+    bridge_pid = -1;
     bridge_ready = 0;
     buf_free(&outq);
     buf_free(&inq);
@@ -1375,18 +1673,49 @@ static void squat_stop(const char *why)
     free(known);
     known = NULL;
     nknown = capknown = 0;
+    if (why) {
+	oprintf("%% squat: %s", why);
+	if (rv_fd >= 0) oputs("% squat: no bridge attached; waiting for one (/squat on starts one, or run: tf-squatterd serve --data-dir ...)");
+    }
+}
+
+/* /squat off, TinyFugue exiting: close everything, remove the rendezvous. */
+static void squat_stop(const char *why)
+{
+    pid_t pid = bridge_pid;
+
+    squat_detach(NULL);
+    rv_close();
+    if (status_field_added && !in_atexit_stop) {
+	run_status_command("/status_rm squat_status");
+	status_field_added = 0;
+    }
+    if (pid > 0) {
+	kill(pid, SIGTERM);
+	if (pid == child_pid) {
+	    if (waitpid(pid, NULL, WNOHANG) == 0) reap_pid = pid;
+	    child_pid = -1;
+	}
+    }
+    if (child_pid > 0) {
+	kill(child_pid, SIGTERM);
+	if (waitpid(child_pid, NULL, WNOHANG) == 0) reap_pid = child_pid;
+	child_pid = -1;
+    }
+    instance[0] = '\0';
     if (why) oprintf("%% squat: %s", why);
 }
 
 static void squat_atexit(void)
 {
     in_atexit_stop = 1;
-    if (squat_fd >= 0) squat_stop(NULL);
+    if (squat_on()) squat_stop(NULL);
 }
 
 void squat_init(void)
 {
     squat_fd = -1;
+    rv_fd = cand_fd = -1;
 }
 
 void squat_shutdown(void)
@@ -1429,13 +1758,27 @@ static int squat_start(void)
     dirvar = getvar("squat_dir");
     if (dirvar && *dirvar) snprintf(dir, sizeof dir, "%s", dirvar);
     else {
+	/* ~/.squatterd/tf, next to the standalone squatterd's data; an install made before that
+	 * default existed keeps using ~/.tf-squatter (its pairing and TLS fingerprint stay valid) */
+	char root[PATH_MAX], legacy[PATH_MAX];
+	struct stat st;
 	home = getenv("HOME");
-	snprintf(dir, sizeof dir, "%s/.tf-squatter", home ? home : ".");
+	snprintf(root, sizeof root, "%s/.squatterd", home ? home : ".");
+	snprintf(dir, sizeof dir, "%s/tf", root);
+	snprintf(legacy, sizeof legacy, "%s/.tf-squatter", home ? home : ".");
+	if (stat(dir, &st) != 0 && stat(legacy, &st) == 0 && S_ISDIR(st.st_mode))
+	    snprintf(dir, sizeof dir, "%s", legacy);
+	else
+	    mkdir(root, 0700);
     }
     mkdir(dir, 0700);
     snprintf(squat_scripts_dir, sizeof squat_scripts_dir, "%s/scripts", dir);
     mkdir(squat_scripts_dir, 0700);
     snprintf(logpath, sizeof logpath, "%s/bridge.log", dir);
+    /* the rendezvous a restarted bridge knocks on; without it the bridge still works, it just
+     * cannot be restarted in place */
+    if (rv_fd < 0 && !rv_open(dir))
+	oputs("% squat: warning: cannot open the rendezvous socket; the bridge cannot be restarted without /squat off, /squat on");
 
     argv[argc++] = (char *)bin;
     argv[argc++] = (char *)"serve";
@@ -1488,17 +1831,17 @@ static int squat_start(void)
     fcntl(sv[0], F_SETFL, fcntl(sv[0], F_GETFL, 0) | O_NONBLOCK);
     fcntl(sv[0], F_SETFD, FD_CLOEXEC);
     squat_fd = sv[0];
-    bridge_pid = pid;
+    bridge_pid = child_pid = pid;
     bridge_ready = 0;
     readers_set(squat_fd);
     if (!atexit_set) { atexit(squat_atexit); atexit_set = 1; }
 
     boot_epoch = (unsigned long)time(NULL);
-    if ((rfd = open("/dev/urandom", O_RDONLY)) >= 0) {
+    if (!instance[0] && (rfd = open("/dev/urandom", O_RDONLY)) >= 0) {
 	if (read(rfd, rnd, sizeof rnd) != (ssize_t)sizeof rnd) memset(rnd, 0, sizeof rnd);
 	close(rfd);
     } else memset(rnd, 0, sizeof rnd);
-    snprintf(instance, sizeof instance, "%02x%02x%02x%02x%02x%02x%02x%02x",
+    if (!instance[0]) snprintf(instance, sizeof instance, "%02x%02x%02x%02x%02x%02x%02x%02x",
 	rnd[0], rnd[1], rnd[2], rnd[3], rnd[4] ^ (unsigned)getpid(), rnd[5],
 	rnd[6], rnd[7]);
 
@@ -1555,8 +1898,10 @@ struct Value *handle_squat_command(String *args, int offset)
     while (*arg == ' ') arg++;
 
     if (!*word || !strcmp(word, "status")) {
-	oprintf("%% squat: %s%s", squat_fd >= 0 ? "on" : "off",
-	    squat_fd >= 0 ? (bridge_ready ? ", bridge ready" : ", bridge starting") : "");
+	oprintf("%% squat: %s%s", squat_on() ? "on" : "off",
+	    squat_fd >= 0 ? (bridge_ready ? ", bridge ready" : ", bridge starting") :
+	    squat_on() ? ", no bridge attached (waiting for one to knock)" : "");
+	if (squat_on() && rv_sock[0]) oprintf("%% squat: rendezvous %s", rv_sock);
 	if (squat_fd >= 0) {
 	    oprintf("%% squat: %ld session(s) reported, instance %s",
 		(long)nknown, instance);
@@ -1566,11 +1911,12 @@ struct Value *handle_squat_command(String *args, int offset)
     }
     if (!strcmp(word, "on")) return newint(squat_start());
     if (!strcmp(word, "off")) {
-	if (squat_fd < 0) { oputs("% squat: already off"); return shareval(val_zero); }
+	if (!squat_on()) { oputs("% squat: already off"); return shareval(val_zero); }
 	squat_stop("stopped");
 	return shareval(val_one);
     }
-    if (squat_fd < 0) { eprintf("squat is off; use /squat on"); return shareval(val_zero); }
+    if (!squat_on()) { eprintf("squat is off; use /squat on"); return shareval(val_zero); }
+    if (squat_fd < 0) { eprintf("no bridge is attached; /squat on starts one"); return shareval(val_zero); }
     if (!strcmp(word, "pair")) { send_simple("PAIR", *arg ? arg : "operator"); return shareval(val_one); }
     if (!strcmp(word, "devices")) { send_simple("DEVICES", NULL); return shareval(val_one); }
     if (!strcmp(word, "revoke")) {

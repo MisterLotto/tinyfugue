@@ -75,6 +75,10 @@ extern void squat_shutdown(void);
 extern void squat_tick(void);		/* once per loop: socket diff, flush */
 extern void squat_readable(void);	/* control fd is readable */
 extern void squat_writable(void);	/* control fd is writable */
+extern int squat_rv_fd;			/* rendezvous listener, or -1 */
+extern int squat_cand_fd;		/* a bridge that knocked, or -1 */
+extern void squat_rv_readable(void);	/* someone connected to the rendezvous */
+extern void squat_cand_readable(void);	/* the knocking bridge sent something */
 
 /* ---- event taps (cheap no-ops when the bridge is not running) ---- */
 extern void squat_line(const SquatSock *s, int kind, int flags,
