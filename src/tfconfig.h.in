@@ -108,6 +108,17 @@
 
 #undef inline
 
+/* On WIDECHAR builds wcwidth() and other X/Open wide-char functions must be
+ * enabled before the first system header is included.  <assert.h> below (and
+ * tfdefs.h) pull in glibc's <features.h>, which locks the feature set, so
+ * defining _XOPEN_SOURCE later (e.g. in port.h) comes too late and wcwidth()
+ * ends up implicitly declared.  Set it here, before any system header. */
+#if WIDECHAR
+# ifndef _XOPEN_SOURCE
+#  define _XOPEN_SOURCE 600
+# endif
+#endif
+
 #include "tfdefs.h"
 
 #undef NDEBUG
