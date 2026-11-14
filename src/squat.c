@@ -308,6 +308,7 @@ typedef struct Known {
     int state, remote_echo, fg, tls, input, automation;
     int was_connected, quit_requested, seen;
     char sid[160];
+    char world[128];		/* the name last announced (a world can be renamed) */
 } Known;
 
 static Known *known;
@@ -348,7 +349,16 @@ static void known_del(Known *k)
 /* session ids                                                         */
 /* ------------------------------------------------------------------ */
 
+/* A session keeps the id it was announced with, even when its world is renamed. */
+static void make_sid_new(const SquatSock *s, char *out, size_t n);
 static void make_sid(const SquatSock *s, char *out, size_t n)
+{
+    Known *k = known_find(s->serial);
+    if (k && k->sid[0]) snprintf(out, n, "%s", k->sid);
+    else make_sid_new(s, out, n);
+}
+
+static void make_sid_new(const SquatSock *s, char *out, size_t n)
 {
     char w[48];
     size_t i, j = 0;
@@ -450,7 +460,8 @@ static Known *announce(const SquatSock *s)
     k->automation = s->automation;
     k->was_connected = (s->state == SQUAT_ST_CONNECTED);
     k->seen = 1;
-    make_sid(s, k->sid, sizeof k->sid);
+    snprintf(k->world, sizeof k->world, "%s", s->world);
+    make_sid_new(s, k->sid, sizeof k->sid);
     emit_sess(s, k);
     emit_ctrl(s, "");
     if (s->state != SQUAT_ST_CONNECTING)
@@ -661,8 +672,9 @@ static void tick_cb(const SquatSock *s, void *u)
     k->seen = 1;
     if (s->state == SQUAT_ST_CONNECTED) k->was_connected = 1;
     changed = k->state != s->state || k->remote_echo != s->remote_echo ||
-	k->fg != s->fg || k->tls != s->tls;
+	k->fg != s->fg || k->tls != s->tls || strcmp(k->world, s->world) != 0;
     if (changed) {
+	snprintf(k->world, sizeof k->world, "%s", s->world);
 	k->state = s->state;
 	k->remote_echo = s->remote_echo;
 	k->fg = s->fg;
@@ -689,6 +701,8 @@ static void reap_children(void)
     }
 }
 
+static void check_worlds_changed(void);
+
 void squat_tick(void)
 {
     size_t i;
@@ -711,6 +725,7 @@ void squat_tick(void)
 	    known_del(&known[i]);
 	} else i++;
     }
+    check_worlds_changed();
     update_status();
     out_flush();
 }
@@ -718,6 +733,46 @@ void squat_tick(void)
 /* ------------------------------------------------------------------ */
 /* worlds                                                              */
 /* ------------------------------------------------------------------ */
+
+/* A hash of everything about the named worlds that a client lists, to notice that the
+ * list changed no matter who changed it (the TF keyboard, a macro file, a remote client). */
+static unsigned long worlds_hash;
+static int worlds_hash_init;
+
+static void hash_str(unsigned long *h, const char *s)
+{
+    for (; s && *s; s++) *h = (*h * 16777619UL) ^ (unsigned char)*s;
+    *h = (*h * 16777619UL) ^ 0xff;
+}
+
+static void worldhash_cb(World *w)
+{
+    if (w->flags & WORLD_TEMP) return;
+    hash_str(&worlds_hash, w->name);
+    hash_str(&worlds_hash, w->host);
+    hash_str(&worlds_hash, w->port);
+    hash_str(&worlds_hash, w->type);
+    hash_str(&worlds_hash, w->character);
+    hash_str(&worlds_hash, w->mfile);
+    hash_str(&worlds_hash, (w->pass && *w->pass) ? "p" : "");
+    worlds_hash = (worlds_hash * 16777619UL) ^ (unsigned long)(w->flags & (WORLD_SSL | WORLD_ECHO));
+}
+
+/* Tell the bridge when the world list changed. */
+static void check_worlds_changed(void)
+{
+    unsigned long before = worlds_hash;
+
+    worlds_hash = 2166136261UL;
+    mapworld(worldhash_cb);
+    if (worlds_hash_init && worlds_hash != before) {
+	Buf b = { 0 };
+	buf_str(&b, "WCHG");
+	send_msg(&b);
+	buf_free(&b);
+    }
+    worlds_hash_init = 1;
+}
 
 static void world_cb(World *w)
 {
@@ -1162,6 +1217,23 @@ static void handle_message(char *line)
     }
     if (!strcmp(f[0], "CTRL_SET")) { cmd_ctrl_set(f, nf); return; }
     if (!strcmp(f[0], "WORLD_PUT")) { cmd_world_put(f, nf); return; }
+    if (!strcmp(f[0], "WORLD_REN")) {
+	/* WORLD_REN reqid old new save */
+	char err[160] = "";
+	int r;
+	if (nf < 5) { reply_err(nf > 1 ? f[1] : "", "bad_request", "WORLD_REN needs 4 fields"); return; }
+	r = squat_world_rename(f[2], f[3], err, sizeof err);
+	if (r == -1) reply_err(f[1], "no_such_world", "no such world");
+	else if (r < 0) reply_err(f[1], "bad_request", err);
+	else {
+	    char m[300];
+	    snprintf(m, sizeof m, "world %s renamed to %s remotely", f[2], f[3]);
+	    notice(m);
+	    if (f[4][0] == '1') run_tf_command("/saveworld");
+	    reply_ok(f[1]);
+	}
+	return;
+    }
     if (!strcmp(f[0], "WORLD_DEL")) {
 	/* WORLD_DEL reqid name */
 	int r;

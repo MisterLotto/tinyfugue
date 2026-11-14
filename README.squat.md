@@ -100,6 +100,17 @@ Each world has two independent switches:
   never run as a TinyFugue command: it goes to the game verbatim. There is no way
   to send TinyFugue code or files through the bridge other than `tf.exec`.
 
+## Worlds
+
+`/renameworld [<old>] <new>` is a new TinyFugue command (also what a client's rename does):
+with one argument it renames the world of the current connection, with two it renames any world.
+On a connection made with `/connect host port`, whose world is the temporary `(unnamedN)`, it
+**turns the connection into a named world** that `/saveworld` keeps.
+
+A client can create, edit, **rename** and delete world records. A rename keeps the connection
+(and its session id) of a connected world. Whatever changes the list (this client, another one,
+or your own keyboard) is announced to every client, so lists stay in agreement.
+
 ## Uploaded scripts
 
 An admin device can send a macro file (`tf.script.put`): the bridge stores it in

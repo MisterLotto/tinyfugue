@@ -103,8 +103,10 @@ World *new_world(const char *name, const char *type,
     int is_redef = FALSE;
 
     /* unnamed worlds can't be defined but can have other fields changed. */
+    /* "(unnamedN)" is the name of a temporary world (what /connect host port makes); /reboot
+     * has to be able to recreate it */
     if (name && (!*name || strchr(name, ' ') ||
-	(*name == '(' && (*host || *port))))
+	(*name == '(' && (*host || *port) && !(flags & WORLD_TEMP))))
     {
         eprintf("illegal world name: %s", name);
         return NULL;
@@ -205,6 +207,59 @@ int nuke_world(World *w)
     return 1;
 }
 
+/* Rename a world record in place, also while it is connected (a world is found by name each
+ * time it is needed).  A temporary world (what /connect host port makes, "(unnamedN)") becomes a
+ * permanent, named one and is kept after the connection closes.  0 ok, -1 no such world,
+ * -2 not allowed (message in err). */
+int rename_world_record(const char *oldname, const char *newname, char *err, size_t errlen)
+{
+    World *w = find_world(oldname), *other;
+
+    if (!w || !oldname || !*oldname) { snprintf(err, errlen, "no such world"); return -1; }
+    if (!newname || !*newname || strchr(newname, ' ') || *newname == '(' ||
+	cstrcmp(newname, "default") == 0)
+    {
+	snprintf(err, errlen, "illegal world name");
+	return -2;
+    }
+    if ((other = find_world(newname)) && other != w) {
+	snprintf(err, errlen, "a world named %s already exists", newname);
+	return -2;
+    }
+    if (strcmp(w->name, newname) != 0) {
+	FREE(w->name);
+	w->name = STRDUP(newname);
+    }
+    w->flags &= ~WORLD_TEMP;
+    return 0;
+}
+
+/* /renameworld [<old>] <new>: rename a world; with one argument, the world of the current
+ * connection.  On a connection made with /connect host port this turns it into a named world
+ * that /saveworld keeps. */
+struct Value *handle_renameworld_command(String *args, int offset)
+{
+    char err[160] = "";
+    char *ptr = args->data + offset;
+    const char *a = stringarg(&ptr, NULL), *b = NULL;
+    char first[256];
+    int r;
+
+    if (!a || !*a) { eprintf("usage: /renameworld [<old>] <new>"); return shareval(val_zero); }
+    snprintf(first, sizeof first, "%s", a);
+    b = stringarg(&ptr, NULL);
+    if (!b || !*b) {
+	const char *cur = fgname();
+	if (!cur) { eprintf("no current connection: /renameworld <old> <new>"); return shareval(val_zero); }
+	r = rename_world_record(cur, first, err, sizeof err);
+    } else {
+	r = rename_world_record(first, b, err, sizeof err);
+    }
+    if (r < 0) { eprintf("%s", err); return shareval(val_zero); }
+    oputs("% World renamed.");
+    return shareval(val_one);
+}
+
 #if ENABLE_SQUAT
 /* ---- remote world editing (squat.c) ------------------------------------ */
 
@@ -280,6 +335,11 @@ int squat_world_put(const char *name, const char *host, const char *port,
     }
 #endif
     return created;
+}
+
+int squat_world_rename(const char *oldname, const char *newname, char *err, size_t errlen)
+{
+    return rename_world_record(oldname, newname, err, errlen);
 }
 
 /* Delete a world record.  0 ok, -1 no such world, -2 in use. */

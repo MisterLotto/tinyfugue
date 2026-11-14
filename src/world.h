@@ -66,6 +66,10 @@ extern int    squat_world_put(const char *name, const char *host,
                   const char *pass, int pass_mode, const char *mfile, int ssl,
                   int echo, const char *charset, char *err, size_t errlen);
 extern int    squat_world_del(const char *name);
+extern int    rename_world_record(const char *oldname, const char *newname,
+    char *err, size_t errlen);
+extern int    squat_world_rename(const char *oldname, const char *newname,
+    char *err, size_t errlen);
 #endif
 extern void   mapworld(void (*func)(struct World *world));
 
